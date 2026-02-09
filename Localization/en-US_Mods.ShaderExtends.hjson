@@ -1,0 +1,16 @@
+Configs: {
+	ShaderControlConfig: {
+		DisplayName: Shader Control Config
+		Headers.后期渲染开关: 后期渲染开关 Header
+
+		EnableVSPS: {
+			Label: Enable V S P S
+			Tooltip: ""
+		}
+
+		EnableCS: {
+			Label: Enable C S
+			Tooltip: ""
+		}
+	}
+}

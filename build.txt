@@ -1,0 +1,4 @@
+displayName = Shader Model Extends
+author = Anil Star
+version = 0.1.1
+dllReferences = Vortice.Direct3D11, Vortice.DXGI, Vortice.Mathematics,Vortice.DirectX,SharpGen.Runtime,SharpGen.Runtime.COM,OpenTK.Graphics,OpenTK.Core,OpenTK.Mathematics

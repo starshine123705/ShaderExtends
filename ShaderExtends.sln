@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.3.11429.125 d18.3
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ShaderExtends", "ShaderExtends.csproj", "{B656E94E-0508-5F79-F2F1-088251A33A16}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B656E94E-0508-5F79-F2F1-088251A33A16}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B656E94E-0508-5F79-F2F1-088251A33A16}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B656E94E-0508-5F79-F2F1-088251A33A16}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B656E94E-0508-5F79-F2F1-088251A33A16}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {086F7077-7B4E-482A-8083-3947BF196F3A}
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,27 @@
+This is a Mod that provides Shader Model 5.0 Support for the game.
+It currently support D3D11 and OpenGL.
+And Only Vertex Shader/Pixel Shader and Compute Shader can be used.
+It relies on my special shader compiler to compile the shader code, so it can compile once and used every where.
+The Compiler only supports Windows now
+
+The Mod is still in early development, so there are many features that are not implemented yet.
+If any bugs tell me in Steam comments plz.
+
+Add Config to preview the shader effect
+
+Knowed Bugs:
+When you leave the world, the screen will be black until you enter the main menu,currently I have no idea about why it happends.
+
+这个模组为游戏提供了Shader Model 5.0的支持。
+目前支持D3D11和OpenGL。
+并且只能使用顶点着色器/像素着色器和计算着色器。
+它依赖于我编写的特殊着色器编译器来编译着色器代码，这使得它它可以编译一次并在任何地方使用。
+编译器目前仅支持Windows。
+
+该模组仍处于早期开发阶段，因此有许多功能尚未实现。
+如果有任何错误，请在Steam评论中告诉我。
+
+添加了配置以预览着色器效果
+
+已知错误：
+当你离开世界时，屏幕会变黑，直到你进入主菜单，目前我不知道为什么会发生这种情况。
