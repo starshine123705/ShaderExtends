@@ -1,4 +1,5 @@
 ﻿using Microsoft.Xna.Framework;
+using ShaderExtends.Interfaces;
 
 namespace ShaderExtends.Base
 {

@@ -1,15 +1,44 @@
 ﻿using ShaderExtends.Base;
-using ShaderExtends.Interfaces;
 using System;
 using System.Collections.Generic;
 
-public unsafe interface IFCSMaterial : IDisposable
+namespace ShaderExtends.Interfaces
 {
-    public Dictionary<string, FCSParameter> Parameters { get; }
+    public unsafe interface IFCSMaterial : IDisposable
+    {
+        /// <summary>
+        /// 着色器参数
+        /// </summary>
+        Dictionary<string, FCSParameter> Parameters { get; }
 
-    void SyncToDevice(object deviceContext = null);
-    IShadowBuffer Shadow { get; }
-    void EnsureShadow(int w, int h);
+        /// <summary>
+        /// 获取顶点布局（后端无关）
+        /// </summary>
+        ShaderVertexLayout VertexLayout { get; }
 
-    void InternalUpdate(int slot, int offset, void* src, int size);
+        /// <summary>
+        /// 阴影缓冲区
+        /// </summary>
+        IShadowBuffer Shadow { get; }
+
+        /// <summary>
+        /// 同步到 GPU
+        /// </summary>
+        void SyncToDevice(object deviceContext = null);
+
+        /// <summary>
+        /// 确保阴影缓冲区大小
+        /// </summary>
+        void EnsureShadow(int w, int h);
+
+        /// <summary>
+        /// 内部更新
+        /// </summary>
+        void InternalUpdate(int slot, int offset, void* src, int size);
+
+        /// <summary>
+        /// 应用材质
+        /// </summary>
+        void Apply();
+    }
 }

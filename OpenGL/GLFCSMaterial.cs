@@ -7,12 +7,17 @@ using System.Runtime.CompilerServices;
 
 namespace ShaderExtends.OpenGL
 {
-    public class GLFCSMaterial : IFCSMaterial
+    public unsafe class GLFCSMaterial : IFCSMaterial
     {
         public int GLProgram { get; set; }
         public int GLCS { get; set; }
 
         public Dictionary<string, FCSParameter> Parameters { get; } = [];
+
+        /// <summary>
+        /// 从 Effect 获取顶点布局
+        /// </summary>
+        public ShaderVertexLayout VertexLayout => Effect.VertexLayout;
 
         public IShadowBuffer Shadow { get; private set; }
         public int GroupsX { get; private set; }
@@ -20,9 +25,9 @@ namespace ShaderExtends.OpenGL
 
         public GLFCSEffect Effect { get; }
 
-        private readonly Dictionary<int, byte[]> _cpuBuffers = new Dictionary<int, byte[]>();
-        private readonly Dictionary<int, int> _ubos = new Dictionary<int, int>();
-        private readonly HashSet<int> _dirtySlots = new HashSet<int>();
+        private readonly Dictionary<int, byte[]> _cpuBuffers = new();
+        private readonly Dictionary<int, int> _ubos = new();
+        private readonly HashSet<int> _dirtySlots = new();
         private readonly Action _onDispose;
 
         public GLFCSMaterial(GLFCSEffect effect, Action onDispose)
@@ -30,11 +35,11 @@ namespace ShaderExtends.OpenGL
             Effect = effect;
             GLProgram = effect.GLProgram;
             GLCS = effect.GLCS;
+            _onDispose = onDispose;
 
             foreach (var cb in effect.Metadata.Buffers)
             {
                 _cpuBuffers[cb.Slot] = new byte[cb.TotalSize];
-
                 _dirtySlots.Add(cb.Slot);
 
                 foreach (var varMeta in cb.Variables)
@@ -44,12 +49,11 @@ namespace ShaderExtends.OpenGL
                         varMeta.Value.Offset,
                         varMeta.Value.Size,
                         cb.Slot,
+                        this
                     );
                 }
             }
-            _onDispose = onDispose;
         }
-
 
         public void UpdateBuffer(int slot, byte[] data)
         {
@@ -60,10 +64,9 @@ namespace ShaderExtends.OpenGL
             }
         }
 
-        public unsafe void InternalUpdate(int slot, int offset, void* src, int size)
+        public void InternalUpdate(int slot, int offset, void* src, int size)
         {
             if (!_cpuBuffers.TryGetValue(slot, out var buffer)) return;
-
             if (offset + size > buffer.Length) return;
 
             fixed (byte* pBuf = buffer)
@@ -99,11 +102,44 @@ namespace ShaderExtends.OpenGL
             Shadow?.Dispose();
             Shadow = new GLShadowBuffer(w, h);
 
-            GroupsX = (int)((w + 15) / 16);
-            GroupsY = (int)((h + 15) / 16);
+            GroupsX = (w + 15) / 16;
+            GroupsY = (h + 15) / 16;
         }
 
         public int GetUbo(int slot) => _ubos.TryGetValue(slot, out int ubo) ? ubo : 0;
+
+        public void Apply()
+        {
+            SyncToDevice();
+
+            if (GLProgram != 0)
+            {
+                GL.UseProgram(GLProgram);
+
+                foreach (var buffer in Effect.Metadata.Buffers)
+                {
+                    int ubo = GetUbo(buffer.Slot);
+                    if (ubo != 0)
+                    {
+                        GL.BindBufferBase(BufferRangeTarget.UniformBuffer, buffer.Slot, ubo);
+                    }
+                }
+            }
+
+            if (GLCS != 0)
+            {
+                GL.UseProgram(GLCS);
+
+                foreach (var buffer in Effect.Metadata.Buffers)
+                {
+                    int ubo = GetUbo(buffer.Slot);
+                    if (ubo != 0)
+                    {
+                        GL.BindBufferBase(BufferRangeTarget.UniformBuffer, buffer.Slot, ubo);
+                    }
+                }
+            }
+        }
 
         public void Dispose()
         {
@@ -112,9 +148,7 @@ namespace ShaderExtends.OpenGL
                 GL.DeleteBuffer(ubo);
             }
             Shadow?.Dispose();
-
             Effect.Release();
-
             _onDispose?.Invoke();
         }
     }

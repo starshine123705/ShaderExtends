@@ -1,9 +1,11 @@
 ﻿using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
+using ShaderExtends.Interfaces;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 using Terraria;
 using Terraria.Map;
 using Terraria.ModLoader;
@@ -18,7 +20,6 @@ namespace ShaderExtends.Base
         public static FNARenderContext Context;
         public override void Load()
         {
-
             On_Main.DoDraw += Main_DoDraw;
             RenderTargetPatch.Patch();
             PresentPatch.Patch();
@@ -145,7 +146,6 @@ namespace ShaderExtends.Base
         public static RenderTarget2D tempTarget;
 
         public static RenderTarget2D tempTarget2;
-
         public static void Patch()
         {
             try
@@ -218,12 +218,16 @@ namespace ShaderExtends.Base
                         if (ShaderControlConfig.EnableVSPSStatic)
                         {
                             helperSpriteBatch.GraphicsDevice.SetRenderTarget(tempTarget);
-                            PostProcessSystem.Context.Apply(mat, RenderTargetPatch.MyFinalTarget, tempTarget);
+                            PostProcessSystem.Context.Begin();
+                            PostProcessSystem.Material.Apply();
+                            PostProcessSystem.Context.Draw(RenderTargetPatch.MyFinalTarget, Vector2.Zero, Color.White);
+                            PostProcessSystem.Context.End();
+                            //PostProcessSystem.Context.Apply(mat, RenderTargetPatch.MyFinalTarget, tempTarget);
                         }
                         else
                         {
                             helperSpriteBatch.GraphicsDevice.SetRenderTarget(tempTarget2);
-                            PostProcessSystem.Context.Apply(mat, RenderTargetPatch.MyFinalTarget, tempTarget2);
+                            //PostProcessSystem.Context.Apply(mat, RenderTargetPatch.MyFinalTarget, tempTarget2);
                         }
 
                     }

@@ -33,10 +33,11 @@ public static class FCSShaderFactory
                 }
             case FNA3D_SysRendererType.D3D11:
                 {
+
+                    var backend = BackendInterop.GetBackendPointers(device);
+                    var d3dDevice = MarshallingHelpers.FromPointer<ID3D11Device>(backend.d3d11_device);
                     if (!_effectCache.TryGetValue(fcsPath, out var cachedD3DEffect))
                     {
-                        var backend = BackendInterop.GetBackendPointers(device);
-                        var d3dDevice = MarshallingHelpers.FromPointer<ID3D11Device>(backend.d3d11_device);
                         var reader = FCSReader.Load(fcsPath);
                         cachedD3DEffect = new D3D11FCSEffect(d3dDevice, reader);
                         _effectCache[fcsPath] = cachedD3DEffect;
@@ -44,8 +45,9 @@ public static class FCSShaderFactory
 
                     var d3dEffect = (D3D11FCSEffect)cachedD3DEffect;
                     d3dEffect.AddRef();
+                    var d3dContext = MarshallingHelpers.FromPointer<ID3D11DeviceContext>(backend.d3d11_context);
 
-                    return new D3D11FCSMaterial(d3dEffect.d3D11Device, d3dEffect, () => UnregisterEffect(fcsPath));
+                    return new D3D11FCSMaterial(d3dDevice, d3dContext, d3dEffect, () => UnregisterEffect(fcsPath));
                 }
             default:
                 {
