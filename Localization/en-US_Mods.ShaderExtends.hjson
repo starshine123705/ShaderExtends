@@ -1,7 +1,11 @@
 Configs: {
 	ShaderControlConfig: {
 		DisplayName: Shader Control Config
-		Headers.后期渲染开关: 后期渲染开关 Header
+
+		Headers: {
+			后期渲染开关: 后期渲染开关 Header
+			后期处理参数: 后期处理参数 Header
+		}
 
 		EnableVSPS: {
 			Label: Enable V S P S
@@ -10,6 +14,56 @@ Configs: {
 
 		EnableCS: {
 			Label: Enable C S
+			Tooltip: ""
+		}
+
+		EnableSampleShader: {
+			Label: Enable Sample Shader
+			Tooltip: ""
+		}
+
+		_Threshold: {
+			Label: _ Threshold
+			Tooltip: ""
+		}
+
+		_Smoothness: {
+			Label: _ Smoothness
+			Tooltip: ""
+		}
+
+		_ChromaticAberration: {
+			Label: _ Chromatic Aberration
+			Tooltip: ""
+		}
+
+		_BloomIntensity: {
+			Label: _ Bloom Intensity
+			Tooltip: ""
+		}
+
+		_VignetteStrength: {
+			Label: _ Vignette Strength
+			Tooltip: ""
+		}
+
+		_FilmGrainAmount: {
+			Label: _ Film Grain Amount
+			Tooltip: ""
+		}
+
+		_Saturation: {
+			Label: _ Saturation
+			Tooltip: ""
+		}
+
+		_Contrast: {
+			Label: _ Contrast
+			Tooltip: ""
+		}
+
+		_Brightness: {
+			Label: _ Brightness
 			Tooltip: ""
 		}
 	}

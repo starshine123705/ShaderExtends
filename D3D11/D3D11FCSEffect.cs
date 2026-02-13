@@ -49,7 +49,7 @@ namespace ShaderExtends.D3D11
                 VS = device.CreateVertexShader(fcs.DxbcVS);
 
                 // 通过反射构建顶点布局
-                VertexLayout = BuildVertexLayoutFromReflection(fcs.DxbcVS);
+                VertexLayout = BuildVertexLayoutFromMetadata();
 
                 // 创建 InputLayout
                 if (VertexLayout != null && VertexLayout.Elements.Count > 0)
@@ -82,34 +82,6 @@ namespace ShaderExtends.D3D11
             if (magic != 0x43425844)
             {
                 Console.WriteLine("警告：这不是标准的 DXBC 格式！");
-            }
-        }
-
-        private ShaderVertexLayout BuildVertexLayoutFromReflection(byte[] vsBytecode)
-        {
-            try
-            {
-                using var reflection = D3D11Device.Reflect<ID3D11ShaderReflection>(vsBytecode);
-                var shaderDesc = reflection.Description;
-                var layout = new ShaderVertexLayout();
-
-                for (int i = 0; i < shaderDesc.InputParameters; i++)
-                {
-                    var paramDesc = reflection.GetInputParameterDescription(i);
-                    var format = D3D11FormatHelper.FromReflection(paramDesc.ComponentType, paramDesc.Mask);
-
-                    layout.AddElement(paramDesc.SemanticName, paramDesc.SemanticIndex, format);
-                }
-
-#if DEBUG
-                layout.DebugPrint();
-#endif
-                return layout;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"着色器反射失败: {ex.Message}");
-                return BuildVertexLayoutFromMetadata();
             }
         }
 

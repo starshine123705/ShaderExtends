@@ -1,4 +1,5 @@
-﻿using Microsoft.Xna.Framework.Graphics;
+﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
 using System;
 
 namespace ShaderExtends.Interfaces
@@ -42,6 +43,14 @@ namespace ShaderExtends.Interfaces
             int stride = 0,
             int count = 3);
 
+
+        void Draw(
+            Texture2D source,
+            IntPtr vBufPtr = default,
+            int stride = 0,
+            int count = 3,
+            float depth = 0f);
+
         /// <summary>
         /// 结束批处理并执行所有累积的渲染操作
         /// </summary>
@@ -57,6 +66,16 @@ namespace ShaderExtends.Interfaces
         /// </summary>
         SpriteSortMode CurrentSortMode { get; }
 
-        public nint CreateVertexBuffer(float[] data);
+        IFCSMaterial CurrentMaterial { get; set; }
+
+        public nint CreateVertexBuffer(Rectangle source,
+            Rectangle dest,
+            int texWidth,
+            int texHeight,
+            float rotation,
+            float depth,
+            uint color,
+            bool flipX,
+            bool flipY);
     }
 }

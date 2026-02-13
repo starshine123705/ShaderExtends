@@ -1,15 +1,13 @@
 ﻿using Microsoft.Xna.Framework;
-using XnaBlend = Microsoft.Xna.Framework.Graphics.Blend;
-using XnaBlendFunction = Microsoft.Xna.Framework.Graphics.BlendFunction;
-using XnaCompareFunction = Microsoft.Xna.Framework.Graphics.CompareFunction;
-using XnaStencilOperation = Microsoft.Xna.Framework.Graphics.StencilOperation;
-using XnaCullMode = Microsoft.Xna.Framework.Graphics.CullMode;
-using XnaFillMode = Microsoft.Xna.Framework.Graphics.FillMode;
+using Microsoft.Xna.Framework.Graphics;
 using ShaderExtends.Base;
+using ShaderExtends.Core;
 using ShaderExtends.Interfaces;
 using SharpGen.Runtime;
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using Terraria;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
@@ -17,12 +15,20 @@ using Vortice.Mathematics;
 using Blend = Vortice.Direct3D11.Blend;
 using TextureAddressMode = Vortice.Direct3D11.TextureAddressMode;
 using Viewport = Vortice.Mathematics.Viewport;
-using Microsoft.Xna.Framework.Graphics;
+using XnaBlend = Microsoft.Xna.Framework.Graphics.Blend;
+using XnaBlendFunction = Microsoft.Xna.Framework.Graphics.BlendFunction;
+using XnaCompareFunction = Microsoft.Xna.Framework.Graphics.CompareFunction;
+using XnaCullMode = Microsoft.Xna.Framework.Graphics.CullMode;
+using XnaFillMode = Microsoft.Xna.Framework.Graphics.FillMode;
+using XnaStencilOperation = Microsoft.Xna.Framework.Graphics.StencilOperation;
 
 namespace ShaderExtends.D3D11
 {
     public unsafe class FNAD3D11Driver : IDisposable, IFNARenderDriver
     {
+
+        private float _depthEpsilon = 0f;
+        private const float EpsilonStep = 0.000001f;
         private readonly GraphicsDevice _graphicsDevice;
         private readonly ID3D11Device _d3dDevice;
         private readonly ID3D11DeviceContext _d3dContext;
@@ -34,6 +40,11 @@ namespace ShaderExtends.D3D11
         private RenderTarget2D _currentDestination;
         private SpriteSortMode _currentSortMode;
         private List<DrawQueueItem> _drawQueue = new();
+        public IFCSMaterial CurrentMaterial
+        {
+            get { return _currentMaterial; }
+            set { _currentMaterial = value; }
+        }
 
         private struct DrawQueueItem
         {
@@ -43,6 +54,35 @@ namespace ShaderExtends.D3D11
             public int Count;
             public IntPtr TextureHandle;
         }
+
+        private ID3D11Buffer _dynamicVertexBuffer; // 全局复用的动态顶点缓冲区
+        private int _dynamicVertexBufferSize = 0;
+
+        // 原始绘图指令（对应 RawPool）
+        private struct DrawCommand
+        {
+            public IntPtr TextureHandle;
+            public Texture2D SourceTexture; //以此获取宽高
+            public int RawOffset;    // 在 RawPool 中的字节偏移
+            public int VertexCount;
+            public float SortDepth;  // 用于 BackToFront 排序
+            public bool IsVertexless; // 无顶点数据（仅依赖 SV_VertexID）
+        }
+
+        // 合并后的 GPU 指令（对应 SortedPool）
+        private struct GpuBatchCommand
+        {
+            public IntPtr TextureHandle;
+            public Texture2D SourceTexture;
+            public int StartVertex;  // 在 GPU Buffer 中的起始顶点下标
+            public int VertexCount;
+            public bool IsVertexless; // 无顶点数据批次
+        }
+
+        private List<DrawCommand> _drawCommands = new List<DrawCommand>(2048);
+        private List<GpuBatchCommand> _gpuBatches = new List<GpuBatchCommand>(128);
+
+        DeviceState state;
 
         public bool IsActive => _isActive;
         public SpriteSortMode CurrentSortMode => _currentSortMode;
@@ -97,7 +137,7 @@ namespace ShaderExtends.D3D11
         {
             if (_isActive)
                 throw new InvalidOperationException("批处理已在进行中，请先调用 End()");
-
+            SaveDeviceState(out state);
             _isActive = true;
             _currentMaterial = material;
             _currentDestination = destination;
@@ -106,114 +146,349 @@ namespace ShaderExtends.D3D11
             _currentRasterizerState = rasterizerState;
             _currentDepthStencilState = depthStencilState;
             _drawQueue.Clear();
+            _drawCommands.Clear();
+            _gpuBatches.Clear();
         }
 
-        public void Draw(
-            Texture2D source,
-            IntPtr vBufPtr = default,
-            int stride = 0,
-            int count = 3)
+
+        public void Draw(Texture2D source, IntPtr vBufPtr, int stride, int count)
+            => Draw(source, vBufPtr, stride, count, 0f);
+
+        public void Draw(Texture2D source, IntPtr vBufPtr, int stride, int count, float depth)
         {
             if (!_isActive)
                 throw new InvalidOperationException("批处理未启动，请先调用 Begin()");
 
             if (_currentSortMode == SpriteSortMode.Immediate)
             {
-                // Immediate 模式：立即执行（着色器由外部 Material.Apply 设置）
-                ExecuteDrawImmediate(source, vBufPtr, stride, count);
+                ProcessDrawImmediate(source, vBufPtr, stride, count);
             }
             else
             {
-                // Deferred/BackToFront 模式：加入队列
-                _drawQueue.Add(new DrawQueueItem
+                bool vertexless = vBufPtr == IntPtr.Zero;
+                long offsetLong = 0;
+
+                if (!vertexless)
                 {
-                    Source = source,
-                    VBufPtr = vBufPtr,
-                    Stride = stride,
-                    Count = count
+                    // 计算在 RawPool 中的相对偏移量 (字节单位)
+                    // 假设 vBufPtr 是从 GlobalVertexPool.RawPool 分配的
+                    offsetLong = (long)vBufPtr - (long)GlobalVertexPool.RawPool.GetBasePtr();
+                }
+
+                // 直接存入 _drawCommands，供 ProcessDrawQueue 使用
+                _drawCommands.Add(new DrawCommand
+                {
+                    TextureHandle = D3D11TextureHelper.GetD3D11SRV_Method2(source),
+                    SourceTexture = source,
+                    RawOffset = (int)offsetLong,
+                    VertexCount = count,
+                    SortDepth = depth,
+                    IsVertexless = vertexless
                 });
             }
         }
-
-        public void End()
-        {
-            if (!_isActive)
-                throw new InvalidOperationException("批处理未启动");
-
-            try
-            {
-                // Immediate 模式已在 Draw 时执行，无需处理队列
-                if (_currentSortMode != SpriteSortMode.Immediate)
-                {
-                    ProcessDrawQueue();
-                }
-            }
-            finally
-            {
-                _isActive = false;
-                _drawQueue.Clear();
-                _currentMaterial = null;
-            }
-        }
-
         /// <summary>
         /// Immediate 模式下的立即执行（假设着色器已由外部通过 Material.Apply 设置）
         /// </summary>
-        private void ExecuteDrawImmediate(Texture2D source, IntPtr vBufPtr, int stride, int count)
+        private unsafe void ProcessDrawImmediate(Texture2D source, IntPtr vBufPtr, int stride, int count)
         {
-            IntPtr sourceSRVPtr = D3D11TextureHelper.GetD3D11SRV_Method2(source);
-            var inputSRV = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(sourceSRVPtr);
-            
-            _d3dContext.PSSetShaderResource(0, inputSRV);
-            _d3dContext.RSSetViewport(new Vortice.Mathematics.Viewport(0, 0, source.Width, source.Height));
-
-            if (vBufPtr != IntPtr.Zero)
-            {
-                var vBuf = MarshallingHelpers.FromPointer<ID3D11Buffer>(vBufPtr);
-                _d3dContext.IASetVertexBuffer(0, vBuf, (uint)stride, 0);
-            }
-
-            _d3dContext.Draw((uint)count, 0);
-        }
-
-        private void ProcessDrawQueue()
-        {
-            if (_drawQueue.Count == 0)
-                return;
-
+            // 1. 获取主纹理的原始句柄
+            IntPtr finalSRVHandle = D3D11TextureHelper.GetD3D11SRV_Method2(source);
             var material = _currentMaterial as D3D11FCSMaterial;
             if (material == null) return;
 
-            // 1. 获取纹理Handle
-            for (int i = 0; i < _drawQueue.Count; i++)
+            // --- A. Compute Shader (CS) 阶段 ---
+            if (material.Effect.CS != null)
             {
-                var item = _drawQueue[i];
-                item.TextureHandle = D3D11TextureHelper.GetD3D11SRV_Method2(item.Source);
-                _drawQueue[i] = item;
+                material.SyncToDevice();
+                material.EnsureShadow(source.Width, source.Height);
+                var shadow = material.Shadow as D3D11ShadowBuffer;
+                if (shadow != null)
+                {
+                    _d3dContext.CSSetShader(material.Effect.CS);
+
+                    // 【多纹理支持 - CS输入】
+                    // 绑定主纹理到 CS t0
+                    var mainSRVForCS = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(finalSRVHandle);
+                    _d3dContext.CSSetShaderResource(0, mainSRVForCS);
+
+                    // 绑定材质中的额外纹理到 CS (t1, t2...)
+                    if (material.SourceTexture != null)
+                    {   
+                        for (int i = 1; i < material.SourceTexture.Length; i++)
+                        {
+                            if (material.SourceTexture[i] == null) continue;
+                            var extraSRV = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(
+                                D3D11TextureHelper.GetD3D11SRV_Method2(material.SourceTexture[i] as Texture2D));
+                            _d3dContext.CSSetShaderResource((uint)i, extraSRV);
+                        }
+                    }
+
+                    _d3dContext.CSSetUnorderedAccessView(0, shadow.UAV);
+                    _d3dContext.Dispatch((uint)material.GroupsX, (uint)material.GroupsY, (uint)material.GroupsZ);
+
+                    // 清理 CS 绑定，防止资源冲突 (Hazard)
+                    _d3dContext.CSSetUnorderedAccessView(0, null);
+                    for (int slot = 0; slot < 8; slot++) _d3dContext.CSSetShaderResource((uint)slot, null);
+
+                    if (material.Effect.VS == null || material.Effect.PS == null)
+                    {
+                        ID3D11RenderTargetView[] currentRTVs = new ID3D11RenderTargetView[1];
+                        _d3dContext.OMGetRenderTargets(1, currentRTVs, out _);
+                        if (currentRTVs[0] != null)
+                        {
+                            var destResource = currentRTVs[0].Resource;
+                            _d3dContext.CopyResource(destResource, shadow.Texture);
+                            destResource.Dispose();
+                            currentRTVs[0].Dispose();
+                        }
+                        return;
+                    }
+                    finalSRVHandle = shadow.SRVHandle;
+                }
             }
 
-            // 2. 按排序模式排序
-            if (_currentSortMode == SpriteSortMode.BackToFront)
+            // --- B. 准备像素着色器 (PS) 环境 ---
+            material.SyncToDevice();
+            ApplyGraphicsState();
+
+            _d3dContext.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+            _d3dContext.VSSetShader(material.Effect.VS);
+            _d3dContext.PSSetShader(material.Effect.PS);
+
+            // 1. 动态绑定常量缓冲区 (CBuffer)
+            foreach (var cbMeta in material.Effect.Metadata.Buffers)
             {
-                _drawQueue.Reverse();
+                var buf = material.GetBuffer(cbMeta.Slot);
+                if (buf != null)
+                {
+                    _d3dContext.VSSetConstantBuffer((uint)cbMeta.Slot, buf);
+                    _d3dContext.PSSetConstantBuffer((uint)cbMeta.Slot, buf);
+                }
             }
-            // Deferred 保持调用顺序
 
-            SaveDeviceState(out var savedState);
+            // 2. 设置采样器 (通常 s0 为通用采样器)
+            _d3dContext.PSSetSampler(0, _samplerState);
 
+            // 3. 【核心修改：多纹理绑定 - PS输入】
+            // 绑定主纹理到 PS t0
+            var finalMainSRV = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(finalSRVHandle);
+            _d3dContext.PSSetShaderResource(0, finalMainSRV);
+
+            // 绑定材质中的所有额外纹理 (t1, t2, t3...)
+            if (material.SourceTexture != null)
+            {
+                for (int i = 1; i < material.SourceTexture.Length; i++)
+                {
+                    if (material.SourceTexture[i] == null) continue;
+                    var extraSRV = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(
+                        D3D11TextureHelper.GetD3D11SRV_Method2(material.SourceTexture[i] as Texture2D));
+                    _d3dContext.PSSetShaderResource((uint)i, extraSRV);
+                }
+            }
+
+            // 4. 设置视口
+            _d3dContext.RSSetViewport(new Vortice.Mathematics.Viewport(0, 0, source.Width, source.Height));
+
+            // --- C. 执行 Draw ---
+            if (vBufPtr == IntPtr.Zero)
+            {
+                _d3dContext.IASetInputLayout(null);
+                _d3dContext.IASetVertexBuffers(0, 1, new ID3D11Buffer[] { null }, new uint[] { 0 }, new uint[] { 0 });
+                _d3dContext.Draw((uint)count, 0);
+            }
+            else
+            {
+                _d3dContext.IASetInputLayout(material.Effect.Layout);
+                var vBuf = MarshallingHelpers.FromPointer<ID3D11Buffer>(vBufPtr);
+                _d3dContext.IASetVertexBuffer(0, vBuf, (uint)stride, 0);
+                _d3dContext.Draw((uint)count, 0);
+            }
+        }
+
+
+        private void ProcessDrawQueue()
+        {
+            if (_drawCommands.Count == 0) return;
+
+            ID3D11RenderTargetView[] rtvs = new ID3D11RenderTargetView[1];
+            _d3dContext.OMGetRenderTargets(1, rtvs, out _);
+
+            uint targetWidth = (uint)Main.screenWidth;  // 默认回退值
+            uint targetHeight = (uint)Main.screenHeight;
+
+            if (rtvs[0] != null)
+            {
+                // 2. 从 RTV 反推 Texture2D 资源
+                using (var resource = rtvs[0].Resource)
+                using (var tex2D = resource.QueryInterface<ID3D11Texture2D>())
+                {
+                    // 3. 获取真正的尺寸！
+                    targetWidth = tex2D.Description.Width;
+                    targetHeight = tex2D.Description.Height;
+                }
+                // 注意：Vortice/SharpDX 的 COM 对象需要释放，rtvs[0] 也要释放
+                rtvs[0].Dispose();
+            }
+
+
+            _gpuBatches.Clear();
+
+            var material = _currentMaterial as D3D11FCSMaterial;
+            int stride = material.VertexStride;
+
+            // ---------------------------------------------------------
+            // 1. 排序 (Sorting) - 决定绘制顺序
+            // ---------------------------------------------------------
+            switch (_currentSortMode)
+            {
+                case SpriteSortMode.Texture:
+                    // 纯粹按纹理排序，追求最少 DrawCall
+                    _drawCommands.Sort((a, b) => a.TextureHandle.CompareTo(b.TextureHandle));
+                    break;
+
+                case SpriteSortMode.BackToFront:
+                    // 深度优先：从远到近绘制
+                    // 如果深度相同，则按纹理排序以尝试合批
+                    _drawCommands.Sort((a, b) =>
+                    {
+                        int depthCompare = b.SortDepth.CompareTo(a.SortDepth); // 降序
+                        return depthCompare != 0 ? depthCompare : a.TextureHandle.CompareTo(b.TextureHandle);
+                    });
+                    break;
+
+                case SpriteSortMode.FrontToBack:
+                    // 深度优先：从近到远绘制
+                    _drawCommands.Sort((a, b) =>
+                    {
+                        int depthCompare = a.SortDepth.CompareTo(b.SortDepth); // 升序
+                        return depthCompare != 0 ? depthCompare : a.TextureHandle.CompareTo(b.TextureHandle);
+                    });
+                    break;
+
+                    // Deferred 模式保持提交顺序，不排序
+            }
+
+            // ---------------------------------------------------------
+            // 2. 紧凑化 & 动态合批 (Compaction & Batching)
+            // ---------------------------------------------------------
+            byte* rawBase = (byte*)GlobalVertexPool.RawPool.GetBasePtr();
+            byte* sortedBase = (byte*)GlobalVertexPool.SortedPool.GetBasePtr();
+
+            int currentSortedOffset = 0; // 目标池的字节偏移
+            int totalVertexCount = 0;    // 总顶点数
+
+            // 读取第一个指令初始化 Batch 状态
+            var firstCmd = _drawCommands[0];
+            IntPtr currentBatchTex = firstCmd.TextureHandle;
+            Texture2D currentBatchSource = firstCmd.SourceTexture;
+            bool currentBatchIsVertexless = firstCmd.IsVertexless;
+            int batchStartVertex = 0;
+            int batchVertexCount = 0;
+
+            int commandCount = _drawCommands.Count;
+            for (int i = 0; i < commandCount; i++)
+            {
+                var cmd = _drawCommands[i];
+                int bytesToCopy = cmd.IsVertexless ? 0 : cmd.VertexCount * stride;
+
+                // A. 内存拷贝：从 RawPool 搬运到 SortedPool 的连续位置
+                if (bytesToCopy > 0)
+                {
+                    int cap = GlobalVertexPool.SortedPool.GetCapacity();
+                    int required = currentSortedOffset + bytesToCopy;
+                    if (required > cap)
+                        throw new InvalidOperationException($"SortedPool overflow: need {required} bytes, capacity {cap}");
+
+                    Buffer.MemoryCopy(
+                        rawBase + cmd.RawOffset,           // 源地址
+                        sortedBase + currentSortedOffset,  // 目标地址
+                        cap - currentSortedOffset,
+                        bytesToCopy
+                    );
+                }
+
+                // B. 合批判定
+                bool sameTexture = (cmd.TextureHandle == currentBatchTex);
+                bool sameVertexKind = (cmd.IsVertexless == currentBatchIsVertexless);
+                bool needSplit = !(sameTexture && sameVertexKind);
+
+                if (needSplit)
+                {
+                    _gpuBatches.Add(new GpuBatchCommand
+                    {
+                        TextureHandle = currentBatchTex,
+                        SourceTexture = currentBatchSource,
+                        StartVertex = batchStartVertex,
+                        VertexCount = batchVertexCount,
+                        IsVertexless = currentBatchIsVertexless
+                    });
+
+                    currentBatchTex = cmd.TextureHandle;
+                    currentBatchSource = cmd.SourceTexture;
+                    currentBatchIsVertexless = cmd.IsVertexless;
+                    batchStartVertex = totalVertexCount; // 对于 Vertexless 无意义，但保持占位
+                    batchVertexCount = 0;
+                }
+
+                currentSortedOffset += bytesToCopy;
+                if (!cmd.IsVertexless)
+                {
+                    totalVertexCount += cmd.VertexCount;
+                }
+                batchVertexCount += cmd.VertexCount;
+            }
+
+            // 循环结束后，不要忘记添加最后一个 Batch
+            _gpuBatches.Add(new GpuBatchCommand
+            {
+                TextureHandle = currentBatchTex,
+                SourceTexture = currentBatchSource,
+                StartVertex = batchStartVertex,
+                VertexCount = batchVertexCount,
+                IsVertexless = currentBatchIsVertexless
+            });
+
+            // ---------------------------------------------------------
+            // 3. 上传到 GPU (Upload)
+            // ---------------------------------------------------------
+            int totalBytesNeeded = totalVertexCount * stride;
+            if (totalBytesNeeded > 0)
+            {
+                EnsureDynamicBufferSize(totalBytesNeeded);
+
+                // Map -> Copy -> Unmap (高性能动态更新)
+                var mapBox = _d3dContext.Map(_dynamicVertexBuffer, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+                Buffer.MemoryCopy(sortedBase, (void*)mapBox.DataPointer, mapBox.RowPitch, totalBytesNeeded);
+                _d3dContext.Unmap(_dynamicVertexBuffer, 0);
+            }
+            else
+            {
+                // 本批次完全无顶点数据，确保不会误用旧的 VB
+                _dynamicVertexBuffer?.Dispose();
+                _dynamicVertexBuffer = null;
+                _dynamicVertexBufferSize = 0;
+            }
+
+            // ---------------------------------------------------------
+            // 4. 执行绘制 (Execute DrawCalls)
+            // ---------------------------------------------------------
             try
             {
-                material.SyncToDevice(_d3dContext);
-
-                // 3. 应用图形状态
+                material.SyncToDevice();
                 ApplyGraphicsState();
 
-                _d3dContext.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+                // 设置全局状态
+                _d3dContext.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
                 _d3dContext.VSSetShader(material.Effect.VS);
                 _d3dContext.PSSetShader(material.Effect.PS);
-                _d3dContext.IASetInputLayout(material.Effect.Layout.Tag == null ? null : material.Effect.Layout);
+                _d3dContext.IASetInputLayout(material.Effect.Layout);
 
-                // 一次性设置常量缓冲
+
+                // 绑定包含了所有排序后顶点的大 Buffer
+                _d3dContext.IASetVertexBuffer(0, _dynamicVertexBuffer, (uint)stride, 0);
+
+                // 常量缓冲
                 for (int i = 0; i < 8; i++)
                 {
                     var buf = material.GetBuffer(i);
@@ -223,45 +498,135 @@ namespace ShaderExtends.D3D11
                         _d3dContext.PSSetConstantBuffer((uint)i, buf);
                     }
                 }
-
                 _d3dContext.PSSetSampler(0, _samplerState);
 
-                // 4. 按纹理分批，减少纹理切换
-                IntPtr currentTexture = IntPtr.Zero;
-
-                foreach (var item in _drawQueue)
+                // 绑定材质中的额外纹理 (t1, t2, t3...)
+                if (material.SourceTexture != null)
                 {
-                    // 仅在纹理改变时绑定（关键优化）
-                    if (item.TextureHandle != currentTexture)
+                    for (int s = 1; s < material.SourceTexture.Length; s++)
                     {
-                        currentTexture = item.TextureHandle;
-                        var currentSRV = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(item.TextureHandle);
-                        _d3dContext.PSSetShaderResource(0, currentSRV);
+                        if (material.SourceTexture[s] == null) continue;
+                        var extraSRV = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(
+                            D3D11TextureHelper.GetD3D11SRV_Method2(material.SourceTexture[s] as Texture2D));
+                        _d3dContext.PSSetShaderResource((uint)s, extraSRV);
+                    }
+                }
+
+                // 遍历批次进行绘制
+                IntPtr lastBoundTex = IntPtr.Zero;
+                int batchCount = _gpuBatches.Count; // 缓存 Count 略微提升性能
+                ID3D11InputLayout lastLayout = material.Effect.Layout;
+
+                for (int i = 0; i < batchCount; i++)
+                {
+                    var batch = _gpuBatches[i];
+                    IntPtr finalSRVHandle = batch.TextureHandle;
+                    // --- 新增：D3D11 Compute Shader 处理逻辑 ---
+                    if (material.Effect.CS != null)
+                    {
+                        // 1. 同步材质参数（如时间、分辨率等）
+                        material.SyncToDevice();
+
+                        // 2. 准备输出缓存（对应 OpenGL 的 ShadowBuffer/ImageTexture）
+                        material.EnsureShadow(batch.SourceTexture.Width, batch.SourceTexture.Height);
+                        var shadow = material.Shadow as D3D11ShadowBuffer; // 假设你有这个类
+
+                        // 3. 绑定输入与输出
+                        var inputSRV = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(batch.TextureHandle);
+                        _d3dContext.CSSetShader(material.Effect.CS);
+                        _d3dContext.CSSetShaderResource(0, inputSRV);
+
+                        // 绑定材质中的额外纹理到 CS (t1, t2...)
+                        if (material.SourceTexture != null)
+                        {
+                            for (int s = 1; s < material.SourceTexture.Length; s++)
+                            {
+                                if (material.SourceTexture[s] == null) continue;
+                                var csExtraSRV = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(
+                                    D3D11TextureHelper.GetD3D11SRV_Method2(material.SourceTexture[s] as Texture2D));
+                                _d3dContext.CSSetShaderResource((uint)s, csExtraSRV);
+                            }
+                        }
+
+                        _d3dContext.CSSetUnorderedAccessView(0, shadow.UAV); // CS 写入需要 UAV
+
+                        // 4. 执行调度
+                        _d3dContext.Dispatch((uint)material.GroupsX, (uint)material.GroupsY, (uint)material.GroupsZ);
+
+                        // 5. 解绑 UAV，以便后续作为 SRV 给 PS 使用
+                        _d3dContext.CSSetUnorderedAccessView(0, null);
+                        _d3dContext.CSSetShaderResource(0, null); // 建议加上这行
+
+                        if (material.Effect.VS == null || material.Effect.PS == null)
+                        {
+                            var targets = Main.spriteBatch.GraphicsDevice.GetRenderTargets();
+                            var destResource = MarshallingHelpers.FromPointer<ID3D11Resource>(D3D11TextureHelper.GetD3D11ResourceHandle(targets[0].RenderTarget as RenderTarget2D));
+                            _d3dContext.CopyResource(destResource, shadow.Texture);
+                            return;
+                        }
+
+                        // 将绘制用的纹理切换为 CS 处理后的结果
+                        finalSRVHandle = shadow.SRVHandle;
                     }
 
-                    // 设置视口
-                    _d3dContext.RSSetViewport(new Vortice.Mathematics.Viewport(0, 0, item.Source.Width, item.Source.Height));
-
-                    // 仅在顶点缓冲改变时重新绑定（关键优化）
-                    if (item.VBufPtr != IntPtr.Zero)
+                    _d3dContext.RSSetViewport(new Vortice.Mathematics.Viewport(0, 0, targetWidth, targetHeight));
+                    // 仅在纹理变化时切换 SRV
+                    if (finalSRVHandle != lastBoundTex)
                     {
-                        var vBuf = MarshallingHelpers.FromPointer<ID3D11Buffer>(item.VBufPtr);
-                        _d3dContext.IASetVertexBuffer(0, vBuf, (uint)item.Stride, 0);
+                        var srv = MarshallingHelpers.FromPointer<ID3D11ShaderResourceView>(finalSRVHandle);
+                        _d3dContext.PSSetShaderResource(0, srv);
+                        lastBoundTex = finalSRVHandle;
                     }
 
-                    _d3dContext.Draw((uint)item.Count, 0);
+                    // 无顶点数据的批次需要解绑输入布局和顶点缓冲
+                    if (batch.IsVertexless)
+                    {
+                        if (lastLayout != null)
+                        {
+                            _d3dContext.IASetInputLayout(null);
+                            lastLayout = null;
+                        }
+
+                        _d3dContext.IASetVertexBuffers(0, 1, new ID3D11Buffer[] { null }, new uint[] { 0 }, new uint[] { 0 });
+                        _d3dContext.Draw((uint)batch.VertexCount, 0);
+                    }
+                    else
+                    {
+                        if (lastLayout == null)
+                        {
+                            _d3dContext.IASetInputLayout(material.Effect.Layout);
+                            lastLayout = material.Effect.Layout;
+                        }
+
+                        _d3dContext.IASetVertexBuffer(0, _dynamicVertexBuffer, (uint)stride, 0);
+                        _d3dContext.Draw((uint)batch.VertexCount, (uint)batch.StartVertex);
+                    }
                 }
             }
-            finally
+            catch
             {
-                _d3dContext.PSSetShaderResource(0, null);
-                _d3dContext.IASetVertexBuffers(0, 1, new ID3D11Buffer[] { null }, new uint[] { 0 }, new uint[] { 0 });
-                _d3dContext.VSSetConstantBuffers(0, 8, new ID3D11Buffer[8]);
-                _d3dContext.PSSetConstantBuffers(0, 8, new ID3D11Buffer[8]);
-                _d3dContext.CSSetShader(null);
-                _d3dContext.Flush();
 
-                RestoreDeviceState(in savedState);
+            }
+        }
+
+        private void EnsureDynamicBufferSize(int sizeInBytes)
+        {
+            if (_dynamicVertexBuffer == null || _dynamicVertexBufferSize < sizeInBytes)
+            {
+                _dynamicVertexBuffer?.Dispose();
+
+                // 稍微多分配一点，避免频繁扩容
+                _dynamicVertexBufferSize = Math.Max(sizeInBytes, _dynamicVertexBufferSize * 2);
+
+                var desc = new BufferDescription
+                {
+                    ByteWidth = (uint)_dynamicVertexBufferSize,
+                    Usage = ResourceUsage.Dynamic,          // 关键：动态
+                    BindFlags = BindFlags.VertexBuffer,
+                    CPUAccessFlags = CpuAccessFlags.Write,  // 关键：CPU可写
+                    StructureByteStride = 0
+                };
+                _dynamicVertexBuffer = _d3dDevice.CreateBuffer(desc);
             }
         }
 
@@ -305,9 +670,9 @@ namespace ShaderExtends.D3D11
             try
             {
                 // 尝试通过反射获取内部的 D3D11BlendState
-                var field = typeof(BlendState).GetField("glBlendState", 
+                var field = typeof(BlendState).GetField("glBlendState",
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                
+
                 if (field != null)
                 {
                     var glState = field.GetValue(blendState);
@@ -336,7 +701,7 @@ namespace ShaderExtends.D3D11
             {
                 var field = typeof(DepthStencilState).GetField("glDepthStencilState",
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                
+
                 if (field != null)
                 {
                     var glState = field.GetValue(depthStencilState);
@@ -365,7 +730,7 @@ namespace ShaderExtends.D3D11
             {
                 var field = typeof(RasterizerState).GetField("glRasterizerState",
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                
+
                 if (field != null)
                 {
                     var glState = field.GetValue(rasterizerState);
@@ -446,7 +811,7 @@ namespace ShaderExtends.D3D11
 
             fixed (float* pFactors = state.OldFactors)
                 _d3dContext.OMSetBlendState(state.OldBlend, pFactors, state.OldSampleMask);
-            
+
             _d3dContext.OMSetDepthStencilState(state.OldDepth, state.OldStencilRef);
             _d3dContext.RSSetState(state.OldRaster);
             _d3dContext.RSSetViewports(state.OldViewports);
@@ -648,10 +1013,92 @@ namespace ShaderExtends.D3D11
             };
         }
 
-        public nint CreateVertexBuffer(float[] data)
+        /// <summary>
+        /// CPU 端：生成顶点数据，返回指针
+        /// </summary>
+        public unsafe nint CreateVertexBuffer(Rectangle source, Rectangle dest, int texWidth, int texHeight, float rotation, float depth, uint color, bool flipX, bool flipY)
         {
-            return 0
-                ;
+
+            var targets = Main.spriteBatch.GraphicsDevice.GetRenderTargets();
+
+            int targetWidth = Main.screenWidth;  // 默认回退值
+            int targetHeight = Main.screenHeight;
+
+            // 3. 获取真正的尺寸！
+            targetWidth = (targets[0].RenderTarget as RenderTarget2D).Width;
+            targetHeight = (targets[0].RenderTarget as RenderTarget2D).Height;
+
+
+            var material = _currentMaterial as D3D11FCSMaterial;
+            if (material.VertexWriter == null)
+                return IntPtr.Zero;
+            int stride = material.VertexStride;
+            int totalBytes = 6 * stride;
+
+            // --- 后端处理深度偏移 ---
+            float adjustedDepth = depth - _depthEpsilon;
+            _depthEpsilon += EpsilonStep;
+
+            IntPtr tempMem = GlobalVertexPool.RawPool.Rent(totalBytes);
+            var writer = material.VertexWriter;
+
+            // 写入微调后的深度
+            writer(tempMem, source, dest, texWidth, texHeight, rotation, adjustedDepth, color, flipX, flipY, targetWidth, targetHeight);
+
+            return tempMem;
         }
+
+        public void End()
+        {
+            try
+            {
+                if (_currentSortMode != SpriteSortMode.Immediate) ProcessDrawQueue();
+            }
+            finally
+            {
+                RestoreDeviceState(in state);
+                _isActive = false;
+                _drawQueue.Clear();
+                _currentMaterial = null;
+                _depthEpsilon = 0f;
+                GlobalVertexPool.ResetAll();
+            }
+        }
+
+        /// <summary>
+        /// GPU 端：创建 Buffer、InputLayout 并绑定到着色器
+        /// </summary>
+        public unsafe nint BindVertexLayout(nint vertexDataPtr, int totalBytes, int stride)
+        {
+            var material = _currentMaterial as D3D11FCSMaterial;
+
+            var desc = new BufferDescription
+            {
+                ByteWidth = (uint)totalBytes,
+                Usage = ResourceUsage.Immutable,
+                BindFlags = BindFlags.VertexBuffer,
+                CPUAccessFlags = CpuAccessFlags.None,
+                MiscFlags = ResourceOptionFlags.None
+            };
+
+            ID3D11Buffer buffer = _d3dDevice.CreateBuffer(desc, new SubresourceData(vertexDataPtr));
+
+            if (material.Effect.Layout.Tag != null)
+            {
+                _d3dContext.IASetInputLayout(material.Effect.Layout);
+            }
+
+            return MarshallingHelpers.ToCallbackPtr(buffer);
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetFormatSize(string format) => format.ToLower() switch
+        {
+            "float4" => 16,
+            "float3" => 12,
+            "float2" => 8,
+            "float" => 4,
+            "color" => 4,
+            _ => 0
+        };
     }
 }

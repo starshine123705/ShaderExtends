@@ -1,7 +1,9 @@
-﻿using ShaderExtends.Base;
+﻿using Microsoft.Xna.Framework.Graphics;
+using ShaderExtends.Base;
 using ShaderExtends.Interfaces;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Vortice.Direct3D11;
 
 namespace ShaderExtends.D3D11
@@ -23,10 +25,17 @@ namespace ShaderExtends.D3D11
 
         private readonly ID3D11Device _device;
         private readonly ID3D11DeviceContext _context;
-
+        public SpriteVertexWriter VertexWriter { get; private set; }
+        public int VertexStride { get; private set; }
         public IShadowBuffer Shadow { get; private set; }
         public int GroupsX { get; private set; }
         public int GroupsY { get; private set; }
+        public int GroupsZ { get; private set; }
+
+
+        private Texture[] _sourceTexture;
+
+        public Texture[] SourceTexture => _sourceTexture;
 
         public D3D11FCSMaterial(ID3D11Device device, ID3D11DeviceContext context, D3D11FCSEffect effect, Action onDispose)
         {
@@ -34,6 +43,13 @@ namespace ShaderExtends.D3D11
             _context = context;
             Effect = effect;
             _onDispose = onDispose;
+
+            int maxSlot = 0;
+            if (effect.Metadata.Textures.Count > 0)
+            {
+                maxSlot = effect.Metadata.Textures.Max(t => t.Slot);
+            }
+            _sourceTexture = new Texture[maxSlot + 1];
 
             foreach (var cb in effect.Metadata.Buffers)
             {
@@ -51,6 +67,14 @@ namespace ShaderExtends.D3D11
                         varMeta.Key, varMeta.Value.Offset, varMeta.Value.Size, cb.Slot, this);
                 }
             }
+            var lastEl = effect.Metadata.InputElements.OrderByDescending(e => e.AlignedByteOffset).FirstOrDefault();
+            VertexStride = lastEl != null ? lastEl.AlignedByteOffset + IFCSMaterial.GetFormatSize(lastEl.Format) : 0;
+
+            // 2. 创建极致优化的顶点写入委托
+            if (effect.Metadata.InputElements.Count > 0)
+            {
+                VertexWriter = SpriteVertexWriterFactory.Create(effect.Metadata.InputElements, VertexStride);
+            }
         }
 
         public void UpdateBuffer(int slot, byte[] data)
@@ -59,9 +83,9 @@ namespace ShaderExtends.D3D11
             _dirtySlots.Add(slot);
         }
 
-        public void SyncToDevice(object deviceContext = null)
+        public void SyncToDevice()
         {
-            var context = deviceContext as ID3D11DeviceContext ?? _context;
+            var context =  _context;
             foreach (var slot in _dirtySlots)
             {
                 fixed (byte* pData = _cpuBuffers[slot])
@@ -72,13 +96,14 @@ namespace ShaderExtends.D3D11
             _dirtySlots.Clear();
         }
 
-        public void EnsureShadow(int w, int h)
+        public void EnsureShadow(int w, int h, int d = -1)
         {
             if (Shadow != null && Shadow.Width == w && Shadow.Height == h) return;
             Shadow?.Dispose();
             Shadow = new D3D11ShadowBuffer(_device, w, h);
-            GroupsX = (w + 15) / 16;
-            GroupsY = (h + 15) / 16;
+            GroupsX = (w + Effect.Metadata.ThreadX - 1) / Effect.Metadata.ThreadX;
+            GroupsY = (h + Effect.Metadata.ThreadY - 1) / Effect.Metadata.ThreadY;
+            GroupsZ = d == -1 ? 1 : (d + Effect.Metadata.ThreadZ - 1) / Effect.Metadata.ThreadZ;
         }
 
         public ID3D11Buffer GetBuffer(int slot) => _gpuBuffers.TryGetValue(slot, out var b) ? b : null;
@@ -90,11 +115,13 @@ namespace ShaderExtends.D3D11
             _dirtySlots.Add(slot);
         }
 
-        public void Apply()
+        public void Apply(IFNARenderDriver driver)
         {
             var context = _context;
 
-            SyncToDevice(context);
+            driver.CurrentMaterial = this;
+
+            SyncToDevice();
 
             if (Effect.VS != null)
                 context.VSSetShader(Effect.VS);

@@ -11,6 +11,8 @@ namespace ShaderExtends.D3D11
         public ID3D11UnorderedAccessView UAV;
         public ID3D11ShaderResourceView SRV;
 
+        public IntPtr SRVHandle { get; private set; }
+
         public int Width { get; private set; }
         public int Height { get; private set; }
 
@@ -35,6 +37,8 @@ namespace ShaderExtends.D3D11
             Texture = device.CreateTexture2D(desc);
             UAV = device.CreateUnorderedAccessView(Texture);
             SRV = device.CreateShaderResourceView(Texture);
+
+            SRVHandle = SRV.NativePointer;
         }
 
         public void Dispose()

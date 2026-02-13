@@ -1,5 +1,6 @@
 ﻿using OpenTK.Graphics.OpenGL4;
 using ShaderExtends.Base;
+using ShaderExtends.D3D11;
 using ShaderExtends.Interfaces;
 using System;
 
@@ -38,8 +39,7 @@ namespace ShaderExtends.OpenGL
             {
                 GLProgram = CreateProgram(fcs.GlslVS, fcs.GlslPS);
 
-                // 从 Program 反射构建顶点布局
-                VertexLayout = BuildVertexLayoutFromProgram(GLProgram);
+                VertexLayout = BuildVertexLayoutFromMetadata();
             }
 
             if (!string.IsNullOrEmpty(fcs.GlslCS))
@@ -105,32 +105,24 @@ namespace ShaderExtends.OpenGL
         #region Vertex Layout Reflection
 
         /// <summary>
-        /// 从 GL Program 反射构建顶点布局
+        /// 从 Metadata 构建顶点布局
         /// </summary>
-        private ShaderVertexLayout BuildVertexLayoutFromProgram(int program)
+        private ShaderVertexLayout BuildVertexLayoutFromMetadata()
         {
+            if (Metadata.InputElements == null || Metadata.InputElements.Count == 0)
+                return null;
+
             var layout = new ShaderVertexLayout();
-
-            GL.GetProgram(program, GetProgramParameterName.ActiveAttributes, out int attribCount);
-
-            for (int i = 0; i < attribCount; i++)
+            foreach (var e in Metadata.InputElements)
             {
-                string name = GL.GetActiveAttrib(program, i, out int size, out ActiveAttribType type);
-                int location = GL.GetAttribLocation(program, name);
-
-                if (location < 0) continue;
-
-                var format = GLTypeToFormat(type);
-
-                // 解析语义名和索引（OpenGL 使用 location 作为索引）
-                ParseSemanticName(name, out string semanticName, out int semanticIndex);
-
-                layout.AddElement(semanticName, semanticIndex, format);
+                var format = D3D11FormatHelper.FromString(e.Format);
+                layout.AddElement(new VertexElementInfo(
+                    e.SemanticName,
+                    e.SemanticIndex,
+                    format,
+                    e.AlignedByteOffset
+                ));
             }
-
-#if DEBUG
-            layout.DebugPrint();
-#endif
             return layout;
         }
 

@@ -1,8 +1,10 @@
-﻿using OpenTK.Graphics.OpenGL4;
+﻿using Microsoft.Xna.Framework.Graphics;
+using OpenTK.Graphics.OpenGL4;
 using ShaderExtends.Base;
 using ShaderExtends.Interfaces;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 namespace ShaderExtends.OpenGL
@@ -17,13 +19,19 @@ namespace ShaderExtends.OpenGL
         /// <summary>
         /// 从 Effect 获取顶点布局
         /// </summary>
-        public ShaderVertexLayout VertexLayout => Effect.VertexLayout;
+        /// 
+        public SpriteVertexWriter VertexWriter { get; private set; }
+        public int VertexStride { get; private set; }
 
         public IShadowBuffer Shadow { get; private set; }
         public int GroupsX { get; private set; }
         public int GroupsY { get; private set; }
-
+        public int GroupsZ { get; private set; }
         public GLFCSEffect Effect { get; }
+
+        private Texture[] _sourceTexture;   
+
+        public Texture[] SourceTexture => _sourceTexture;
 
         private readonly Dictionary<int, byte[]> _cpuBuffers = new();
         private readonly Dictionary<int, int> _ubos = new();
@@ -36,6 +44,13 @@ namespace ShaderExtends.OpenGL
             GLProgram = effect.GLProgram;
             GLCS = effect.GLCS;
             _onDispose = onDispose;
+
+            int maxSlot = 0;
+            if (effect.Metadata.Textures.Count > 0)
+            {
+                maxSlot = effect.Metadata.Textures.Max(t => t.Slot);
+            }
+            _sourceTexture = new Texture[maxSlot + 1];
 
             foreach (var cb in effect.Metadata.Buffers)
             {
@@ -52,6 +67,14 @@ namespace ShaderExtends.OpenGL
                         this
                     );
                 }
+            }
+            var lastEl = effect.Metadata.InputElements.OrderByDescending(e => e.AlignedByteOffset).FirstOrDefault();
+            VertexStride = lastEl != null ? lastEl.AlignedByteOffset + IFCSMaterial.GetFormatSize(lastEl.Format) : 0;
+
+            // 2. 创建极致优化的顶点写入委托
+            if (effect.Metadata.InputElements.Count > 0)
+            {
+                VertexWriter = SpriteVertexWriterFactory.Create(effect.Metadata.InputElements, VertexStride);
             }
         }
 
@@ -76,7 +99,7 @@ namespace ShaderExtends.OpenGL
             _dirtySlots.Add(slot);
         }
 
-        public void SyncToDevice(object notInUse = null)
+        public void SyncToDevice()
         {
             foreach (var slot in _dirtySlots)
             {
@@ -95,21 +118,23 @@ namespace ShaderExtends.OpenGL
             GL.BindBuffer(BufferTarget.UniformBuffer, 0);
         }
 
-        public void EnsureShadow(int w, int h)
+        public void EnsureShadow(int w, int h, int d = -1)
         {
             if (Shadow != null && Shadow.Width == w && Shadow.Height == h) return;
 
             Shadow?.Dispose();
             Shadow = new GLShadowBuffer(w, h);
 
-            GroupsX = (w + 15) / 16;
-            GroupsY = (h + 15) / 16;
+            GroupsX = (w + Effect.Metadata.ThreadX - 1) / Effect.Metadata.ThreadX;
+            GroupsY = (h + Effect.Metadata.ThreadY - 1) / Effect.Metadata.ThreadY;
+            GroupsZ = d == -1 ? 1 : (d + Effect.Metadata.ThreadZ - 1) / Effect.Metadata.ThreadZ;
         }
 
         public int GetUbo(int slot) => _ubos.TryGetValue(slot, out int ubo) ? ubo : 0;
 
-        public void Apply()
+        public void Apply(IFNARenderDriver driver)
         {
+            driver.CurrentMaterial = this;
             SyncToDevice();
 
             if (GLProgram != 0)

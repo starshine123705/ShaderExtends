@@ -11,14 +11,23 @@ namespace ShaderExtends.Base
 {
     public class FCSMetadata
     {
+        public int ThreadX { get; set; } = 1;
+        public int ThreadY { get; set; } = 1;
+        public int ThreadZ { get; set; } = 1;
         public List<CBufferMeta> Buffers { get; set; } = new();
         public List<InputElementMeta> InputElements { get; set; } = new();
-
+        public List<TextureMeta> Textures { get; set; } = new();
         public string? VsEntry { get; set; }
         public string? PsEntry { get; set; }
         public string? CsEntry { get; set; }
-    }
 
+    }
+    public class TextureMeta
+    {
+        public string Name { get; set; } = "";
+        public int Slot { get; set; }      // 对应 t0, t1 中的 0, 1
+        public string Type { get; set; } = ""; // 如 Texture2D
+    }
     public class InputElementMeta
     {
         public string SemanticName { get; set; } = "";
