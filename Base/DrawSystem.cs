@@ -143,7 +143,10 @@ namespace ShaderExtends.Base
         depthStencilState: DepthStencilState.None,
         rasterizerState: RasterizerState.CullNone);
                     mat2.Apply(context.GetFNARenderDriver());
-                    context.Draw(Main.screenTarget, Vector2.Zero, Color.White);
+                    context.Draw(Main.screenTarget, new Rectangle(0, 0, Main.screenWidth / 2, Main.screenHeight / 2), Color.White);
+                    context.Draw(Main.screenTarget, new Rectangle(0, Main.screenHeight / 2, Main.screenWidth / 2, Main.screenHeight / 2), Color.White);
+                    context.Draw(Main.screenTarget, new Rectangle(Main.screenWidth / 2, 0, Main.screenWidth / 2, Main.screenHeight / 2), Color.White);
+                    context.Draw(Main.screenTarget, new Rectangle(Main.screenWidth / 2, Main.screenHeight / 2, Main.screenWidth / 2, Main.screenHeight / 2), Color.White);
                     context.End();
                     device.SetRenderTarget(null);
                     device.Clear(Color.Black);

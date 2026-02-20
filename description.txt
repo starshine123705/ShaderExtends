@@ -7,10 +7,18 @@ The Compiler only supports Windows now
 The Mod is still in early development, so there are many features that are not implemented yet.
 If any bugs tell me in Steam comments plz.
 
+0.1.2.2 Update:
+Fix the bug that destination set in Begin() isnt work in D3D11 Backend,and the bug that OpenGL backend cant work in Vertexless Shader. 
+Change the Draw() method to support byte[] vertex data,allow you to customize the vertex buffer.
+
+0.1.2 Update:
+Fix the bug that cause the screen black when you leave the world, but caused UI cant be shadered.
+Make the shader works like spritebatch,so it has a better user experience.
+
+0.1.1 Update:
 Add Config to preview the shader effect
 
-Knowed Bugs:
-When you leave the world, the screen will be black until you enter the main menu,currently I have no idea about why it happends.
+The Compiler is in Github, the FCSCompiler.zip:
 
 这个模组为游戏提供了Shader Model 5.0的支持。
 目前支持D3D11和OpenGL。
@@ -23,5 +31,18 @@ When you leave the world, the screen will be black until you enter the main menu
 
 添加了配置以预览着色器效果
 
-已知错误：
-当你离开世界时，屏幕会变黑，直到你进入主菜单，目前我不知道为什么会发生这种情况。
+0.1.2.2 更新：
+修复了在D3D11后端中Begin()中设置的目标不起作用的错误，以及OpenGL后端在无顶点着色器时无法工作的错误。
+更改了Draw()方法以支持byte[]顶点数据，允许您自定义顶点缓冲区。
+
+0.1.2更新：
+修复了当你离开世界时导致屏幕变黑的错误，但导致UI无法被着色。
+使着色器像spritebatch一样工作，因此具有更好的用户体验。
+
+0.1.1更新：
+添加了配置以预览着色器效果
+
+编译器在Github上，文件是FCSCompiler.zip：
+
+Github:
+https://github.com/starshine123705/ShaderExtends

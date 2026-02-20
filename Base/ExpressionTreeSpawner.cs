@@ -9,6 +9,10 @@ using System.Runtime.CompilerServices;
 
 namespace ShaderExtends.Base
 {
+    // 文件: Base/ExpressionTreeSpawner.cs
+    // 说明: 使用表达式树动态生成顶点写入器（SpriteVertexWriter），以在运行时根据材质输入布局
+    //      生成高性能的顶点构造委托，减少反射与分支开销。此文件包含基础的原始写入器封装与
+    //      工厂方法。
     public static class VertexBufferRawWriter
     {
         // 浮点型
@@ -82,13 +86,14 @@ namespace ShaderExtends.Base
                 BuildRotatedRect(pDest, pRot, pViewportW, pViewportH, c)
             ));
 
-            int[] pIdxMap = { 0, 2, 4, 4, 2, 6 };
-            float[] uMap = { 0, 1, 0, 0, 1, 1 };
-            float[] vMap = { 0, 0, 1, 1, 0, 1 };
+            // 使用 TriangleStrip：4 个顶点（TL, TR, BL, BR）
+            int[] pIdxMap = { 0, 2, 4, 6 };
+            float[] uMap = { 0, 1, 0, 1 };
+            float[] vMap = { 0, 0, 1, 1 };
 
             foreach (var el in elements)
             {
-                for (int i = 0; i < 6; i++) // 处理 6 个顶点
+                for (int i = 0; i < 4; i++) // 处理 4 个顶点 (TriangleStrip)
                 {
                     // 1. 计算绝对内存偏移
                     var offset = (long)(i * stride + el.AlignedByteOffset);
@@ -238,7 +243,10 @@ namespace ShaderExtends.Base
             // --- 第二步：根据语义(Semantic)分配数据 ---
             if (semantic.Contains("POSITION"))
             {
-                x = c[pIdx]; y = c[pIdx + 1]; z = pDepth; // w 默认为 1.0f
+                x = c[pIdx]; y = c[pIdx + 1]; 
+                z = Expression.Multiply(
+                Expression.Add(pDepth, Expression.Constant(1.0f)),
+                Expression.Constant(0.5f)); // w 默认为 1.0f
             }
             else if (semantic.Contains("TEXCOORD"))
             {

@@ -40,16 +40,22 @@ namespace ShaderExtends.Interfaces
         void Draw(
             Texture2D source,
             IntPtr vBufPtr = default,
+            IntPtr vIndexBufPtr = default,
             int stride = 0,
-            int count = 3);
+            int vertexCount = 6,
+            int indexCount = 6,
+            PrimitiveType primitiveType = PrimitiveType.TriangleList);
 
 
         void Draw(
             Texture2D source,
             IntPtr vBufPtr = default,
+            IntPtr vIndexBufPtr = default,
             int stride = 0,
-            int count = 3,
-            float depth = 0f);
+            int count = 6,
+            int indexCount = 6,
+            float depth = 0f,
+            PrimitiveType primitiveType = PrimitiveType.TriangleList);
 
         /// <summary>
         /// 结束批处理并执行所有累积的渲染操作

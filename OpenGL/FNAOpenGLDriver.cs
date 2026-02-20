@@ -10,6 +10,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using Terraria;
 using Buffer = System.Buffer;
+using XNAPrimitiveType = Microsoft.Xna.Framework.Graphics.PrimitiveType;
 using PrimitiveType = OpenTK.Graphics.OpenGL4.PrimitiveType;
 
 namespace ShaderExtends.OpenGL
@@ -23,13 +24,14 @@ namespace ShaderExtends.OpenGL
         private int _dynamicVbo = 0;
         private int _dynamicVao = 0;
         private int _dynamicVboSize = 0;
+        private int _dynamicIbo = 0;
+        private int _dynamicIboSize = 0;
         private GlStateSnapshot _savedState;
 
         private bool _isActive = false;
         private IFCSMaterial _currentMaterial;
         private RenderTarget2D _currentDestination;
         private SpriteSortMode _currentSortMode;
-        private List<DrawQueueItem> _drawQueue = new();
         private BlendState _currentBlendState;
         private DepthStencilState _currentDepthStencilState;
         private RasterizerState _currentRasterizerState;
@@ -46,6 +48,14 @@ namespace ShaderExtends.OpenGL
             public bool ScissorEnabled;
             public int ActiveTex;
             public int Tex0;
+            public int ElementArrayBuffer;               // EBO 绑定
+            public int[] ScissorBox;                     // 裁剪矩形
+            public float DepthRangeNear, DepthRangeFar;  // 深度范围
+            public bool PrimitiveRestartEnabled;         // 图元重启启用
+            public uint PrimitiveRestartIndex;           // 重启索引
+            public int[] TextureUnits;                   // 每个纹理单元的2D纹理绑定
+            public int[] UniformBufferBindings;          // 每个UBO索引的绑定对象
+            public bool[] VertexAttribEnabled;           // 每个顶点属性的启用状态
         }
 
         public IFCSMaterial CurrentMaterial
@@ -57,36 +67,32 @@ namespace ShaderExtends.OpenGL
 
         private float _depthEpsilon = 0f;
         private const float EpsilonStep = 0.000001f;
-
+        
         private struct DrawCommand
         {
             public uint TextureHandle;
-            public Texture2D SourceTexture; // 保持对纹理的引用
-            public int RawOffset;
+            public Texture2D SourceTexture; //以此获取宽高
+            public int RawOffset;    // 在 RawPool 中的字节偏移
+            public int RawIndexOffset; // 在 IndexPool 中的字节偏移（如果需要）
+            public int IndexCount;
             public int VertexCount;
-            public float SortDepth;
-            public bool IsVertexless; // 无顶点数据（仅依赖 gl_VertexID）
+            public float SortDepth;  // 用于 BackToFront 排序
+            public XNAPrimitiveType PrimitiveType;
+            public bool IsVertexless; // 无顶点数据（仅依赖 SV_VertexID）
         }
 
+        // 合并后的 GPU 指令（对应 SortedPool）
         private struct GpuBatchCommand
         {
             public uint TextureHandle;
-            public Texture2D SourceTexture; // 修改：直接存引用，不再存宽高
-            public int StartVertex;
+            public Texture2D SourceTexture;
+            public int StartVertex;  // 在 GPU Buffer 中的起始顶点下标
+            public int StartIndex;   // 索引绘制时的起始索引下标（如果需要）
+            public int IndexCount;   // 索引绘制时的索引数量（如果需要）
             public int VertexCount;
+            public XNAPrimitiveType PrimitiveType;
             public bool IsVertexless; // 无顶点数据批次
         }
-
-        private struct DrawQueueItem
-        {
-            public Texture2D Source;
-            public IntPtr VBufPtr;
-            public int Stride;
-            public int Count;
-            public uint TextureHandle;
-            public int OriginalIndex;
-        }
-
         private List<DrawCommand> _drawCommands = new List<DrawCommand>(2048);
         private List<GpuBatchCommand> _gpuBatches = new List<GpuBatchCommand>(128);
 
@@ -121,37 +127,55 @@ namespace ShaderExtends.OpenGL
             _currentBlendState = blendState;
             _currentDepthStencilState = depthStencilState;
             _currentRasterizerState = rasterizerState;
-            _drawQueue.Clear();
 
             // 使用全局内存池
             GlobalVertexPool.ResetAll();
         }
 
-        public void Draw(Texture2D source, IntPtr vBufPtr, int stride, int count, float depth)
+        public void Draw(Texture2D source, IntPtr vBufPtr, IntPtr vIndexBufPtr, int stride, int count, int indexCount, float depth, XNAPrimitiveType primitiveType)
         {
-            if (!_isActive) throw new InvalidOperationException("请先调用 Begin");
+            if (!_isActive)
+                throw new InvalidOperationException("批处理未启动，请先调用 Begin()");
 
             if (_currentSortMode == SpriteSortMode.Immediate)
             {
                 ExecuteDrawImmediate(source, vBufPtr, stride, count);
-                return;
             }
-
-            // 计算在 RawPool 中的字节偏移
-            long offset = (long)vBufPtr - (long)GlobalVertexPool.RawPool.GetBasePtr();
-
-            _drawCommands.Add(new DrawCommand
+            else
             {
-                TextureHandle = OpenGLTextureHelper.GetGLHandle(source),
-                SourceTexture = source,
-                RawOffset = (int)offset,
-                VertexCount = count,
-                SortDepth = depth
-            });
+                bool vertexless = vBufPtr == IntPtr.Zero;
+                long offsetLong = 0;
+                long offsetIndexLong = -1;
+                if (!vertexless)
+                {
+                    // 计算在 RawPool 中的相对偏移量 (字节单位)
+                    // 假设 vBufPtr 是从 GlobalVertexPool.RawPool 分配的
+                    offsetLong = (long)vBufPtr - (long)GlobalVertexPool.RawPool.GetBasePtr();
+                }
+                if (vIndexBufPtr != IntPtr.Zero && indexCount > 0)
+                {
+                    offsetIndexLong = (long)vIndexBufPtr - (long)GlobalVertexPool.IndexPool.GetBasePtr();
+                }
+
+                // 直接存入 _drawCommands，供 ProcessDrawQueue 使用
+                _drawCommands.Add(new DrawCommand
+                {
+                    TextureHandle = OpenGLTextureHelper.GetGLHandle(source),
+                    SourceTexture = source,
+                    RawOffset = (int)offsetLong,
+                    RawIndexOffset = (int)offsetIndexLong,
+                    IndexCount = indexCount,
+                    VertexCount = count,
+                    SortDepth = depth,
+                    IsVertexless = vertexless,
+                    PrimitiveType = primitiveType
+                });
+            }
         }
 
-        public void Draw(Texture2D source, IntPtr vBufPtr, int stride, int count)
-            => Draw(source, vBufPtr, stride, count, 0f);
+        public void Draw(Texture2D source, IntPtr vBufPtr, IntPtr vIndexBufPtr, int stride, int count, int indexCount, XNAPrimitiveType primitiveType)
+            => Draw(source, vBufPtr, vIndexBufPtr, stride, count, indexCount, 0f, primitiveType);
+
 
         public void End()
         {
@@ -169,7 +193,6 @@ namespace ShaderExtends.OpenGL
             {
                 RestoreGlState();
                 _isActive = false;
-                _drawQueue.Clear();
                 _drawCommands.Clear();
                 _gpuBatches.Clear();
                 _currentMaterial = null;
@@ -219,7 +242,19 @@ namespace ShaderExtends.OpenGL
             GL.UseProgram(material.GLProgram);
             BindAllSamplers(material, (int)finalTex);
             BindAllUbos(material);
-            GL.Viewport(0, 0, source.Width, source.Height);
+
+            if (_currentDestination != null)
+            {
+                uint destHandle = OpenGLTextureHelper.GetGLHandle(_currentDestination);
+                GL.BindFramebuffer(FramebufferTarget.Framebuffer, _internalFBO);
+                GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, (int)destHandle, 0);
+                GL.Viewport(0, 0, _currentDestination.Width, _currentDestination.Height);
+            }
+            else
+            {
+                GL.BindFramebuffer(FramebufferTarget.Framebuffer, _savedState.Fbo);
+                GL.Viewport(0, 0, _graphicsDevice.PresentationParameters.BackBufferWidth, _graphicsDevice.PresentationParameters.BackBufferHeight);
+            }
 
             // --- 3. 核心修改：无顶点适配 ---
             if (vBufPtr != IntPtr.Zero)
@@ -239,7 +274,12 @@ namespace ShaderExtends.OpenGL
                 GL.DrawArrays(PrimitiveType.Triangles, 0, 6);
             }
         }
-
+        private unsafe void TranslatePrimitiveTypeToIndexBuffer(byte* currentPtr)
+        {
+            Unsafe.CopyBlockUnaligned(currentPtr, NativeLinearIndexGenerator.Data, 4 * sizeof(ushort));
+            currentPtr += 8;
+            *(ushort*)currentPtr = 0xFFFF;
+        }
         private void ProcessDrawQueue()
         {
             if (_drawCommands.Count == 0) return;
@@ -272,20 +312,29 @@ namespace ShaderExtends.OpenGL
             // 2. 紧凑化搬运与合批分析
             byte* rawBase = (byte*)GlobalVertexPool.RawPool.GetBasePtr();
             byte* sortedBase = (byte*)GlobalVertexPool.SortedPool.GetBasePtr();
+            byte* indexBase = (byte*)GlobalVertexPool.IndexPool.GetBasePtr();
+            byte* sortedIndexBase = (byte*)GlobalVertexPool.SortedIndexPool.GetBasePtr();
 
             int currentSortedOffset = 0;
+            int currentSortedIndexOffset = 0;
             int totalVertexCount = 0;
+            int totalIndexCount = 0;     // 总索引数（如果需要）
 
             var first = _drawCommands[0];
             uint batchTex = first.TextureHandle;
             Texture2D lastTexObj = first.SourceTexture;
             bool batchVertexless = first.IsVertexless;
+            XNAPrimitiveType currentPrimitiveType = first.PrimitiveType;
             int batchStartVertex = 0;
             int batchVertexCount = 0;
+            int batchStartIndex = 0;
+            int batchIndexCount = 0;
+
 
             foreach (var cmd in _drawCommands)
             {
                 int bytesToCopy = cmd.IsVertexless ? 0 : cmd.VertexCount * stride;
+                int bytesToCopyIndex = cmd.IndexCount * sizeof(ushort);
 
                 if (bytesToCopy > 0)
                 {
@@ -301,18 +350,48 @@ namespace ShaderExtends.OpenGL
                         bytesToCopy
                     );
                 }
+                if (bytesToCopyIndex > 0)
+                {
+                    if (cmd.RawIndexOffset != -1)
+                    {
+                        int cap = GlobalVertexPool.SortedIndexPool.GetCapacity();
+                        int req = currentSortedIndexOffset + bytesToCopyIndex;
+                        if (req > cap)
+                            throw new InvalidOperationException($"SortedIndexPool overflow: need {req} bytes, capacity {cap}");
+
+                        Buffer.MemoryCopy(
+                            indexBase + cmd.RawIndexOffset,           // 源地址
+                            sortedIndexBase + currentSortedIndexOffset,
+                            cap - currentSortedIndexOffset,
+                            bytesToCopyIndex
+                            );
+                    }
+                    else
+                    {
+                        int cap = GlobalVertexPool.SortedIndexPool.GetCapacity();
+                        int req = currentSortedIndexOffset + bytesToCopyIndex;
+                        if (req > cap)
+                            throw new InvalidOperationException($"SortedIndexPool overflow: need {req} bytes, capacity {cap}");
+                        TranslatePrimitiveTypeToIndexBuffer(sortedIndexBase + currentSortedIndexOffset);
+                    }
+                }
 
                 bool sameTexture = cmd.TextureHandle == batchTex;
                 bool sameKind = cmd.IsVertexless == batchVertexless;
-                if (!(sameTexture && sameKind))
+                bool samePrimitiveType = (cmd.PrimitiveType == currentPrimitiveType);
+                bool isntBacthOverflow = !(batchVertexCount + cmd.VertexCount > 65535);
+                if (!(sameTexture && sameKind && samePrimitiveType && isntBacthOverflow))
                 {
                     _gpuBatches.Add(new GpuBatchCommand
                     {
                         TextureHandle = batchTex,
+                        SourceTexture = lastTexObj,
                         StartVertex = batchStartVertex,
                         VertexCount = batchVertexCount,
-                        SourceTexture = lastTexObj,
-                        IsVertexless = batchVertexless
+                        StartIndex = batchStartIndex,
+                        IndexCount = batchIndexCount,
+                        IsVertexless = batchVertexless,
+                        PrimitiveType = currentPrimitiveType
                     });
 
                     batchTex = cmd.TextureHandle;
@@ -320,28 +399,43 @@ namespace ShaderExtends.OpenGL
                     batchVertexless = cmd.IsVertexless;
                     batchStartVertex = totalVertexCount;
                     batchVertexCount = 0;
+                    batchStartIndex = totalIndexCount;
+                    batchIndexCount = 0;
                 }
 
                 currentSortedOffset += bytesToCopy;
                 if (!cmd.IsVertexless)
+                {
                     totalVertexCount += cmd.VertexCount;
+                }
+                totalIndexCount += cmd.IndexCount;
                 batchVertexCount += cmd.VertexCount;
+                batchIndexCount += cmd.IndexCount;
             }
 
             // 扫尾
             _gpuBatches.Add(new GpuBatchCommand
             {
                 TextureHandle = batchTex,
+                SourceTexture = lastTexObj,
                 StartVertex = batchStartVertex,
                 VertexCount = batchVertexCount,
-                SourceTexture = lastTexObj,
-                IsVertexless = batchVertexless
+                StartIndex = batchStartIndex,
+                IndexCount = batchIndexCount,
+                IsVertexless = batchVertexless,
+                PrimitiveType = currentPrimitiveType
             });
 
             int totalBytesNeeded = totalVertexCount * stride;
             if (totalBytesNeeded > 0)
             {
                 UpdateDynamicBuffer(sortedBase, totalBytesNeeded, material);
+            }
+
+            int totalIndexBytesNeeded = totalIndexCount * sizeof(ushort);
+            if (totalIndexBytesNeeded > 0)
+            {
+                UpdateDynamicIndexBuffer(sortedIndexBase, totalIndexBytesNeeded);
             }
 
             RenderBatches(material, totalBytesNeeded > 0);
@@ -360,6 +454,20 @@ namespace ShaderExtends.OpenGL
             // 记录原始 FBO 以便在没有 RenderTarget 时切回
             int oldFBO = GL.GetInteger(GetPName.DrawFramebufferBinding);
 
+            // --- C. 设置渲染目标 (FBO) ---
+            if (_currentDestination != null)
+            {
+                uint destHandle = OpenGLTextureHelper.GetGLHandle(_currentDestination);
+                GL.BindFramebuffer(FramebufferTarget.Framebuffer, _internalFBO);
+                GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, (int)destHandle, 0);
+                GL.Viewport(0, 0, _currentDestination.Width, _currentDestination.Height);
+            }
+            else
+            {
+                GL.BindFramebuffer(FramebufferTarget.Framebuffer, oldFBO);
+                GL.Viewport(0, 0, _graphicsDevice.PresentationParameters.BackBufferWidth, _graphicsDevice.PresentationParameters.BackBufferHeight);
+            }
+            GL.Enable(EnableCap.DebugOutput);
             foreach (var batch in _gpuBatches)
             {
                 uint finalTex = batch.TextureHandle;
@@ -405,38 +513,48 @@ namespace ShaderExtends.OpenGL
                 // --- B. 准备绘制上下文 ---
                 GL.UseProgram(material.GLProgram);
                 BindAllSamplers(material, (int)finalTex);
-                BindAllUbos(material);
+                BindAllUbos(material); 
+                PrimitiveType glType = ConvertPtimitive(batch.PrimitiveType);
 
-                // --- C. 设置渲染目标 (FBO) ---
-                if (_currentDestination != null)
-                {
-                    uint destHandle = OpenGLTextureHelper.GetGLHandle(_currentDestination);
-                    GL.BindFramebuffer(FramebufferTarget.Framebuffer, _internalFBO);
-                    GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, (int)destHandle, 0);
-                    GL.Viewport(0, 0, _currentDestination.Width, _currentDestination.Height);
-                }
-                else
-                {
-                    GL.BindFramebuffer(FramebufferTarget.Framebuffer, oldFBO);
-                    GL.Viewport(0, 0, _graphicsDevice.PresentationParameters.BackBufferWidth, _graphicsDevice.PresentationParameters.BackBufferHeight);
-                }
-
-                // --- D. 执行绘制 ---
                 if (batch.IsVertexless)
                 {
                     if (_emptyVao == -1) _emptyVao = GL.GenVertexArray();
                     GL.BindVertexArray(_emptyVao);
-                    GL.DrawArrays(PrimitiveType.Triangles, 0, batch.VertexCount);
+
+                    // 无顶点渲染通常也是按照指定的拓扑类型来画
+                    GL.DrawArrays(glType, 0, batch.VertexCount);
+                }
+                else if (batch.IndexCount > 0 && batch.StartIndex != -1)
+                {
+                    // --- 索引绘制 (Indexed Draw) ---
+                    if (!hasVertexData) continue;
+
+                    GL.BindVertexArray(_dynamicVao);
+                    IntPtr indexOffset = new IntPtr(batch.StartIndex * sizeof(ushort));
+                    GL.PushDebugGroup(DebugSourceExternal.DebugSourceApplication, 0, -1, "MyCustomDraw");
+                    // 传入映射后的 glType
+                    GL.DrawElementsBaseVertex(
+                        glType,
+                        batch.IndexCount,
+                        DrawElementsType.UnsignedShort,
+                        indexOffset,
+                        batch.StartVertex
+                    );
+                    GL.PopDebugGroup();
                 }
                 else
                 {
-                    if (!hasVertexData)
-                        continue; // 理论上不会发生，防御性
+                    // --- 非索引绘制 (Normal Draw) ---
+                    if (!hasVertexData) continue;
+
                     GL.BindVertexArray(_dynamicVao);
-                    GL.DrawArrays(PrimitiveType.Triangles, batch.StartVertex, batch.VertexCount);
+
+                    // 传入映射后的 glType
+                    GL.DrawArrays(glType, batch.StartVertex, batch.VertexCount);
                 }
             }
 
+            GL.Disable(EnableCap.DebugOutput);
             // 绘制完成后切回原始 FBO
             GL.BindFramebuffer(FramebufferTarget.Framebuffer, oldFBO);
         }
@@ -491,11 +609,11 @@ namespace ShaderExtends.OpenGL
             var blend = _currentBlendState ?? BlendState.Opaque;
             var depth = _currentDepthStencilState ?? DepthStencilState.Default;
             var raster = _currentRasterizerState ?? RasterizerState.CullCounterClockwise;
-
+            GL.Enable(EnableCap.PrimitiveRestart);
+            GL.PrimitiveRestartIndex(0xFFFF);
             ApplyBlendState(blend);
             ApplyDepthStencilState(depth);
             ApplyRasterizerState(raster);
-            GL.Disable(EnableCap.ScissorTest);
         }
 
         private void ApplyBlendState(BlendState blend)
@@ -674,6 +792,16 @@ namespace ShaderExtends.OpenGL
             StencilOperation.Invert => StencilOp.Invert,
             _ => StencilOp.Keep
         };
+        
+        private PrimitiveType ConvertPtimitive(XNAPrimitiveType type) => type switch
+        {
+            XNAPrimitiveType.TriangleList => PrimitiveType.Triangles,
+            XNAPrimitiveType.TriangleStrip => PrimitiveType.TriangleStrip,
+            XNAPrimitiveType.LineList => PrimitiveType.Lines,
+            XNAPrimitiveType.LineStrip => PrimitiveType.LineStrip,
+            XNAPrimitiveType.PointListEXT => PrimitiveType.Points,
+            _ => PrimitiveType.Triangles
+        };
 
         public void Dispose()
         {
@@ -727,33 +855,58 @@ namespace ShaderExtends.OpenGL
             {
                 _dynamicVbo = GL.GenBuffer();
                 _dynamicVao = GL.GenVertexArray();
-            }
 
-            GL.BindBuffer(BufferTarget.ArrayBuffer, _dynamicVbo);
-
-            if (size > _dynamicVboSize)
-            {
-                // 扩容：使用 BufferData 分配新空间
-                _dynamicVboSize = size + 1024; // 预留一点缓冲避免频繁扩容
-                GL.BufferData(BufferTarget.ArrayBuffer, _dynamicVboSize, (IntPtr)data, BufferUsageHint.DynamicDraw);
-
-                // 只有在扩容或初次创建时，才需要重新配置 VAO 属性
+                // ！！！VAO的配置逻辑只应在这里，在它诞生的地方！！！
                 GL.BindVertexArray(_dynamicVao);
+
+                // 1. 绑定VBO，让VAO知道它的顶点数据来自哪里
+                GL.BindBuffer(BufferTarget.ArrayBuffer, _dynamicVbo);
+
+                // 2. 配置所有顶点属性，将VBO的格式记录到VAO中
                 var elements = material.Effect.Metadata.InputElements;
                 for (int i = 0; i < elements.Count; i++)
                 {
                     var e = elements[i];
                     GL.EnableVertexAttribArray(i);
-                    // 注意：这里使用的是传统的 VertexAttribPointer，因为它直接作用于当前绑定的 ArrayBuffer
                     GL.VertexAttribPointer(i, GetElementCount(e.Format), VertexAttribPointerType.Float, false, material.VertexStride, e.AlignedByteOffset);
                 }
+
+                // 3. 绑定IBO，让VAO知道它的索引数据来自哪里 (稍后会在UpdateDynamicIndexBuffer中创建)
+                // 这一步至关重要，它将IBO的绑定状态也记录到了VAO中
+                _dynamicIbo = GL.GenBuffer(); // 在这里就生成，保证VAO能记录它
+                GL.BindBuffer(BufferTarget.ElementArrayBuffer, _dynamicIbo);
+
+                // 4. 解绑VAO，保存这个包含了VBO+Attributes+IBO的完美快照
+                GL.BindVertexArray(0);
+            }
+
+            // --- 后续的更新逻辑 ---
+            GL.BindBuffer(BufferTarget.ArrayBuffer, _dynamicVbo);
+            if (size > _dynamicVboSize)
+            {
+                _dynamicVboSize = size + 1024;
+                GL.BufferData(BufferTarget.ArrayBuffer, _dynamicVboSize, (IntPtr)data, BufferUsageHint.DynamicDraw);
             }
             else
             {
-                // Orphanage 优化：传入 NULL 告诉驱动不再引用旧内存，防止管线阻塞
                 GL.BufferData(BufferTarget.ArrayBuffer, _dynamicVboSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
-                // 上传新数据
                 GL.BufferSubData(BufferTarget.ArrayBuffer, IntPtr.Zero, size, (IntPtr)data);
+            }
+        }
+        private void UpdateDynamicIndexBuffer(void* data, int size)
+        {
+            // VAO已经在初始化时知道_dynamicIbo了，这里只需要绑定并更新数据
+            GL.BindBuffer(BufferTarget.ElementArrayBuffer, _dynamicIbo);
+
+            if (size > _dynamicIboSize)
+            {
+                _dynamicIboSize = size + 1024;
+                GL.BufferData(BufferTarget.ElementArrayBuffer, _dynamicIboSize, (IntPtr)data, BufferUsageHint.DynamicDraw);
+            }
+            else
+            {
+                GL.BufferData(BufferTarget.ElementArrayBuffer, _dynamicIboSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+                GL.BufferSubData(BufferTarget.ElementArrayBuffer, IntPtr.Zero, size, (IntPtr)data);
             }
         }
 
@@ -775,10 +928,12 @@ namespace ShaderExtends.OpenGL
             "float3" => 3,
             "float2" => 2,
             "color" => 4,
+            "float" => 1,
             _ => 0
         };
         private void CaptureGlState()
         {
+            // 原有保存
             _savedState.Fbo = GL.GetInteger(GetPName.DrawFramebufferBinding);
             _savedState.Vao = GL.GetInteger(GetPName.VertexArrayBinding);
             _savedState.Vbo = GL.GetInteger(GetPName.ArrayBufferBinding);
@@ -793,6 +948,48 @@ namespace ShaderExtends.OpenGL
             GL.ActiveTexture(TextureUnit.Texture0);
             _savedState.Tex0 = GL.GetInteger(GetPName.TextureBinding2D);
             GL.ActiveTexture((TextureUnit)_savedState.ActiveTex);
+
+            // 新增保存
+            _savedState.ElementArrayBuffer = GL.GetInteger(GetPName.ElementArrayBufferBinding);
+
+            _savedState.ScissorBox = new int[4];
+            GL.GetInteger(GetPName.ScissorBox, _savedState.ScissorBox);
+
+            float[] depthRange = new float[2];
+            GL.GetFloat(GetPName.DepthRange, depthRange);
+            _savedState.DepthRangeNear = depthRange[0];
+            _savedState.DepthRangeFar = depthRange[1];
+
+            _savedState.PrimitiveRestartEnabled = GL.IsEnabled(EnableCap.PrimitiveRestart);
+            _savedState.PrimitiveRestartIndex = (uint)GL.GetInteger(GetPName.PrimitiveRestartIndex);
+
+            // 保存所有纹理单元
+            int maxTexUnits = GL.GetInteger(GetPName.MaxCombinedTextureImageUnits);
+            _savedState.TextureUnits = new int[maxTexUnits];
+            for (int i = 0; i < maxTexUnits; i++)
+            {
+                GL.ActiveTexture(TextureUnit.Texture0 + i);
+                _savedState.TextureUnits[i] = GL.GetInteger(GetPName.TextureBinding2D);
+            }
+            GL.ActiveTexture((TextureUnit)_savedState.ActiveTex); // 恢复活动单元
+
+            // 保存 UBO 绑定
+            int maxUboBindings = GL.GetInteger(GetPName.MaxUniformBufferBindings);
+            _savedState.UniformBufferBindings = new int[maxUboBindings];
+            for (int i = 0; i < maxUboBindings; i++)
+            {
+                 GL.GetInteger(GetIndexedPName.UniformBufferBinding, i, out _savedState.UniformBufferBindings[i]);
+            }
+
+            // 保存顶点属性启用状态
+            int maxAttribs = GL.GetInteger(GetPName.MaxVertexAttribs);
+            _savedState.VertexAttribEnabled = new bool[maxAttribs];
+            for (int i = 0; i < maxAttribs; i++)
+            {
+                int enabled;
+                GL.GetVertexAttrib(i, VertexAttribParameter.ArrayEnabled, out enabled);
+                _savedState.VertexAttribEnabled[i] = enabled != 0;
+            }
         }
 
         private void RestoreGlState()
@@ -800,15 +997,42 @@ namespace ShaderExtends.OpenGL
             GL.BindFramebuffer(FramebufferTarget.Framebuffer, _savedState.Fbo);
             GL.BindVertexArray(_savedState.Vao);
             GL.BindBuffer(BufferTarget.ArrayBuffer, _savedState.Vbo);
+            GL.BindBuffer(BufferTarget.ElementArrayBuffer, _savedState.ElementArrayBuffer);
             GL.UseProgram(_savedState.Program);
             GL.Viewport(_savedState.Viewport[0], _savedState.Viewport[1], _savedState.Viewport[2], _savedState.Viewport[3]);
+
+            GL.Scissor(_savedState.ScissorBox[0], _savedState.ScissorBox[1], _savedState.ScissorBox[2], _savedState.ScissorBox[3]);
+            GL.DepthRange(_savedState.DepthRangeNear, _savedState.DepthRangeFar);
+
             SetEnable(EnableCap.Blend, _savedState.BlendEnabled);
             SetEnable(EnableCap.DepthTest, _savedState.DepthEnabled);
             SetEnable(EnableCap.CullFace, _savedState.CullEnabled);
             SetEnable(EnableCap.ScissorTest, _savedState.ScissorEnabled);
-            GL.ActiveTexture(TextureUnit.Texture0);
-            GL.BindTexture(TextureTarget.Texture2D, _savedState.Tex0);
+            SetEnable(EnableCap.PrimitiveRestart, _savedState.PrimitiveRestartEnabled);
+            GL.PrimitiveRestartIndex(_savedState.PrimitiveRestartIndex);
+
+            // 恢复所有纹理单元
+            for (int i = 0; i < _savedState.TextureUnits.Length; i++)
+            {
+                GL.ActiveTexture(TextureUnit.Texture0 + i);
+                GL.BindTexture(TextureTarget.Texture2D, _savedState.TextureUnits[i]);
+            }
             GL.ActiveTexture((TextureUnit)_savedState.ActiveTex);
+
+            // 恢复 UBO 绑定
+            for (int i = 0; i < _savedState.UniformBufferBindings.Length; i++)
+            {
+                GL.BindBufferBase(BufferRangeTarget.UniformBuffer, i, _savedState.UniformBufferBindings[i]);
+            }
+
+            // 恢复顶点属性启用状态
+            for (int i = 0; i < _savedState.VertexAttribEnabled.Length; i++)
+            {
+                if (_savedState.VertexAttribEnabled[i])
+                    GL.EnableVertexAttribArray(i);
+                else
+                    GL.DisableVertexAttribArray(i);
+            }
         }
 
         private static void SetEnable(EnableCap cap, bool on)
@@ -817,4 +1041,3 @@ namespace ShaderExtends.OpenGL
         }
     }
 }
- 

@@ -1,4 +1,9 @@
-﻿using Microsoft.Xna.Framework;
+﻿// 文件: D3D11/FNAD3D11Driver.cs
+// 说明: Direct3D11 渲染驱动的实现，负责在 D3D11 后端上执行材质的计算/像素着色、
+//      顶点/索引数据合批、动态缓冲上传以及最终的 Draw 调用。包含 Immediate/Deferred
+//      两种绘制路径，并封装了对设备状态的保存与恢复。
+// 注意: 修改本文件时请确保对 COM 对象的释放与状态恢复正确，以免引发资源泄漏或 GPU 状态污染。
+using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using ShaderExtends.Base;
 using ShaderExtends.Core;
@@ -27,6 +32,10 @@ namespace ShaderExtends.D3D11
     public unsafe class FNAD3D11Driver : IDisposable, IFNARenderDriver
     {
 
+        // -----------------------------
+        // 私有字段
+        // -----------------------------
+        // 用于处理每个顶点的深度微偏移，避免 Z-fighting（逐顶点微调）
         private float _depthEpsilon = 0f;
         private const float EpsilonStep = 0.000001f;
         private readonly GraphicsDevice _graphicsDevice;
@@ -39,7 +48,6 @@ namespace ShaderExtends.D3D11
         private IFCSMaterial _currentMaterial;
         private RenderTarget2D _currentDestination;
         private SpriteSortMode _currentSortMode;
-        private List<DrawQueueItem> _drawQueue = new();
         public IFCSMaterial CurrentMaterial
         {
             get { return _currentMaterial; }
@@ -57,6 +65,8 @@ namespace ShaderExtends.D3D11
 
         private ID3D11Buffer _dynamicVertexBuffer; // 全局复用的动态顶点缓冲区
         private int _dynamicVertexBufferSize = 0;
+        private ID3D11Buffer _dynamicIndexBuffer; // 全局复用的动态顶点缓冲区
+        private int _dynamicIndexBufferSize = 0;
 
         // 原始绘图指令（对应 RawPool）
         private struct DrawCommand
@@ -64,8 +74,11 @@ namespace ShaderExtends.D3D11
             public IntPtr TextureHandle;
             public Texture2D SourceTexture; //以此获取宽高
             public int RawOffset;    // 在 RawPool 中的字节偏移
+            public int RawIndexOffset; // 在 IndexPool 中的字节偏移（如果需要）
+            public int IndexCount;
             public int VertexCount;
             public float SortDepth;  // 用于 BackToFront 排序
+            public PrimitiveType PrimitiveType;
             public bool IsVertexless; // 无顶点数据（仅依赖 SV_VertexID）
         }
 
@@ -75,7 +88,10 @@ namespace ShaderExtends.D3D11
             public IntPtr TextureHandle;
             public Texture2D SourceTexture;
             public int StartVertex;  // 在 GPU Buffer 中的起始顶点下标
+            public int StartIndex;   // 索引绘制时的起始索引下标（如果需要）
+            public int IndexCount;   // 索引绘制时的索引数量（如果需要）
             public int VertexCount;
+            public PrimitiveType PrimitiveType;
             public bool IsVertexless; // 无顶点数据批次
         }
 
@@ -91,6 +107,10 @@ namespace ShaderExtends.D3D11
         private RasterizerState _currentRasterizerState;
         private DepthStencilState _currentDepthStencilState;
 
+        /// <summary>
+        /// 构造函数：初始化 D3D11 设备上下文以及常用状态对象（采样器 / 混合态）。
+        /// 注意：若 backend 指针无效会抛出异常。
+        /// </summary>
         public FNAD3D11Driver(GraphicsDevice device, FNA3D_SysRendererEXT backend)
         {
             _graphicsDevice = device;
@@ -140,21 +160,24 @@ namespace ShaderExtends.D3D11
             SaveDeviceState(out state);
             _isActive = true;
             _currentMaterial = material;
-            _currentDestination = destination;
+            if (destination != null)
+            {
+                _currentDestination = destination;
+                _d3dContext.OMSetRenderTargets(MarshallingHelpers.FromPointer<ID3D11RenderTargetView>(D3D11TextureHelper.GetD3D11RTV(destination), null));
+            }
             _currentSortMode = sortMode;
             _currentBlendState = blendState;
             _currentRasterizerState = rasterizerState;
             _currentDepthStencilState = depthStencilState;
-            _drawQueue.Clear();
             _drawCommands.Clear();
             _gpuBatches.Clear();
         }
 
 
-        public void Draw(Texture2D source, IntPtr vBufPtr, int stride, int count)
-            => Draw(source, vBufPtr, stride, count, 0f);
+        public void Draw(Texture2D source, IntPtr vBufPtr, IntPtr vIndexBufPtr, int stride, int count, int indexCount, PrimitiveType primitiveType)
+            => Draw(source, vBufPtr, vIndexBufPtr, stride, count, indexCount, 0f,primitiveType);
 
-        public void Draw(Texture2D source, IntPtr vBufPtr, int stride, int count, float depth)
+        public void Draw(Texture2D source, IntPtr vBufPtr, IntPtr vIndexBufPtr, int stride, int count, int indexCount, float depth, PrimitiveType primitiveType)
         {
             if (!_isActive)
                 throw new InvalidOperationException("批处理未启动，请先调用 Begin()");
@@ -167,12 +190,16 @@ namespace ShaderExtends.D3D11
             {
                 bool vertexless = vBufPtr == IntPtr.Zero;
                 long offsetLong = 0;
-
+                long offsetIndexLong = -1;
                 if (!vertexless)
                 {
                     // 计算在 RawPool 中的相对偏移量 (字节单位)
                     // 假设 vBufPtr 是从 GlobalVertexPool.RawPool 分配的
                     offsetLong = (long)vBufPtr - (long)GlobalVertexPool.RawPool.GetBasePtr();
+                }
+                if(vIndexBufPtr != IntPtr.Zero && indexCount > 0)
+                {
+                    offsetIndexLong = (long)vIndexBufPtr - (long)GlobalVertexPool.IndexPool.GetBasePtr();
                 }
 
                 // 直接存入 _drawCommands，供 ProcessDrawQueue 使用
@@ -181,9 +208,12 @@ namespace ShaderExtends.D3D11
                     TextureHandle = D3D11TextureHelper.GetD3D11SRV_Method2(source),
                     SourceTexture = source,
                     RawOffset = (int)offsetLong,
+                    RawIndexOffset = (int)offsetIndexLong,
+                    IndexCount = indexCount,
                     VertexCount = count,
                     SortDepth = depth,
-                    IsVertexless = vertexless
+                    IsVertexless = vertexless,
+                    PrimitiveType = primitiveType
                 });
             }
         }
@@ -306,6 +336,12 @@ namespace ShaderExtends.D3D11
             }
         }
 
+        private unsafe void TranslatePrimitiveTypeToIndexBuffer(byte* currentPtr, int currentVertex)
+        {
+            Unsafe.CopyBlockUnaligned(currentPtr, NativeLinearIndexGenerator.Data + currentVertex * 2, 3 * sizeof(ushort));
+            currentPtr += 6;
+            Unsafe.CopyBlockUnaligned(currentPtr, NativeLinearIndexGenerator.Data + currentVertex * 2 + 2, 3 * sizeof(ushort));
+        }
 
         private void ProcessDrawQueue()
         {
@@ -374,23 +410,31 @@ namespace ShaderExtends.D3D11
             // ---------------------------------------------------------
             byte* rawBase = (byte*)GlobalVertexPool.RawPool.GetBasePtr();
             byte* sortedBase = (byte*)GlobalVertexPool.SortedPool.GetBasePtr();
+            byte* indexBase = (byte*)GlobalVertexPool.IndexPool.GetBasePtr();
+            byte* sortedIndexBase = (byte*)GlobalVertexPool.SortedIndexPool.GetBasePtr();
 
             int currentSortedOffset = 0; // 目标池的字节偏移
+            int currentSortedIndexOffset = 0;
             int totalVertexCount = 0;    // 总顶点数
+            int totalIndexCount = 0;     // 总索引数（如果需要）
 
             // 读取第一个指令初始化 Batch 状态
             var firstCmd = _drawCommands[0];
             IntPtr currentBatchTex = firstCmd.TextureHandle;
             Texture2D currentBatchSource = firstCmd.SourceTexture;
             bool currentBatchIsVertexless = firstCmd.IsVertexless;
+            PrimitiveType currentPrimitiveType = firstCmd.PrimitiveType;
             int batchStartVertex = 0;
             int batchVertexCount = 0;
+            int batchStartIndex = 0;
+            int batchIndexCount = 0;
 
             int commandCount = _drawCommands.Count;
             for (int i = 0; i < commandCount; i++)
             {
                 var cmd = _drawCommands[i];
                 int bytesToCopy = cmd.IsVertexless ? 0 : cmd.VertexCount * stride;
+                int bytesToCopyIndex = cmd.IndexCount * sizeof(ushort);
 
                 // A. 内存拷贝：从 RawPool 搬运到 SortedPool 的连续位置
                 if (bytesToCopy > 0)
@@ -407,11 +451,37 @@ namespace ShaderExtends.D3D11
                         bytesToCopy
                     );
                 }
+                if(bytesToCopyIndex > 0)
+                {
+                    if (cmd.RawIndexOffset != -1)
+                    {
+                        int cap = GlobalVertexPool.SortedIndexPool.GetCapacity();
+                        int req = currentSortedIndexOffset + bytesToCopyIndex;
+                        if (req > cap)
+                            throw new InvalidOperationException($"SortedIndexPool overflow: need {req} bytes, capacity {cap}");
 
+                        Buffer.MemoryCopy(
+                            indexBase + cmd.RawIndexOffset,           // 源地址
+                            sortedIndexBase + currentSortedIndexOffset,
+                            cap - currentSortedIndexOffset,
+                            bytesToCopyIndex
+                            ); 
+                    }
+                    else
+                    {
+                        int cap = GlobalVertexPool.SortedIndexPool.GetCapacity();
+                        int req = currentSortedIndexOffset + bytesToCopyIndex;
+                        if (req > cap)
+                            throw new InvalidOperationException($"SortedIndexPool overflow: need {req} bytes, capacity {cap}");
+                        TranslatePrimitiveTypeToIndexBuffer(sortedIndexBase + currentSortedIndexOffset, batchVertexCount);
+                    }
+                }
                 // B. 合批判定
                 bool sameTexture = (cmd.TextureHandle == currentBatchTex);
                 bool sameVertexKind = (cmd.IsVertexless == currentBatchIsVertexless);
-                bool needSplit = !(sameTexture && sameVertexKind);
+                bool samePrimitiveType = (cmd.PrimitiveType == currentPrimitiveType);
+                bool isntBacthOverflow = !(batchVertexCount + cmd.VertexCount > 65535);
+                bool needSplit = !(sameTexture && sameVertexKind && samePrimitiveType && isntBacthOverflow);
 
                 if (needSplit)
                 {
@@ -421,22 +491,31 @@ namespace ShaderExtends.D3D11
                         SourceTexture = currentBatchSource,
                         StartVertex = batchStartVertex,
                         VertexCount = batchVertexCount,
-                        IsVertexless = currentBatchIsVertexless
+                        StartIndex = batchStartIndex,
+                        IndexCount = batchIndexCount,
+                        IsVertexless = currentBatchIsVertexless,
+                        PrimitiveType = currentPrimitiveType
                     });
 
                     currentBatchTex = cmd.TextureHandle;
                     currentBatchSource = cmd.SourceTexture;
                     currentBatchIsVertexless = cmd.IsVertexless;
-                    batchStartVertex = totalVertexCount; // 对于 Vertexless 无意义，但保持占位
+                    currentPrimitiveType = cmd.PrimitiveType;
+                    batchStartVertex = totalVertexCount;
                     batchVertexCount = 0;
+                    batchStartIndex = totalIndexCount;
+                    batchIndexCount = 0;
                 }
 
                 currentSortedOffset += bytesToCopy;
+                currentSortedIndexOffset += bytesToCopyIndex;
                 if (!cmd.IsVertexless)
                 {
                     totalVertexCount += cmd.VertexCount;
                 }
+                totalIndexCount += cmd.IndexCount;
                 batchVertexCount += cmd.VertexCount;
+                batchIndexCount += cmd.IndexCount;
             }
 
             // 循环结束后，不要忘记添加最后一个 Batch
@@ -446,20 +525,31 @@ namespace ShaderExtends.D3D11
                 SourceTexture = currentBatchSource,
                 StartVertex = batchStartVertex,
                 VertexCount = batchVertexCount,
-                IsVertexless = currentBatchIsVertexless
+                StartIndex = batchStartIndex,
+                IndexCount = batchIndexCount,
+                IsVertexless = currentBatchIsVertexless,
+                PrimitiveType = currentPrimitiveType
             });
 
             // ---------------------------------------------------------
             // 3. 上传到 GPU (Upload)
             // ---------------------------------------------------------
             int totalBytesNeeded = totalVertexCount * stride;
+            int totalIndexBytesNeeded = totalIndexCount * sizeof(ushort);
             if (totalBytesNeeded > 0)
             {
                 EnsureDynamicBufferSize(totalBytesNeeded);
 
                 // Map -> Copy -> Unmap (高性能动态更新)
                 var mapBox = _d3dContext.Map(_dynamicVertexBuffer, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
-                Buffer.MemoryCopy(sortedBase, (void*)mapBox.DataPointer, mapBox.RowPitch, totalBytesNeeded);
+                // bulk copy using Unsafe.CopyBlockUnaligned for performance
+                {
+                    byte* src = sortedBase;
+                    byte* dst = (byte*)mapBox.DataPointer;
+                    ref byte rSrc = ref Unsafe.AsRef<byte>(src);
+                    ref byte rDst = ref Unsafe.AsRef<byte>(dst);
+                    Unsafe.CopyBlockUnaligned(ref rDst, ref rSrc, (uint)totalBytesNeeded);
+                }
                 _d3dContext.Unmap(_dynamicVertexBuffer, 0);
             }
             else
@@ -468,6 +558,27 @@ namespace ShaderExtends.D3D11
                 _dynamicVertexBuffer?.Dispose();
                 _dynamicVertexBuffer = null;
                 _dynamicVertexBufferSize = 0;
+            }
+
+            if(totalIndexBytesNeeded > 0)
+            {
+                EnsureDynamicIndexBufferSize(totalIndexBytesNeeded);
+
+                var mapBox = _d3dContext.Map(_dynamicIndexBuffer, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+                {
+                    byte* src = sortedIndexBase;
+                    byte* dst = (byte*)mapBox.DataPointer;
+                    ref byte rSrc = ref Unsafe.AsRef<byte>(src);
+                    ref byte rDst = ref Unsafe.AsRef<byte>(dst);
+                    Unsafe.CopyBlockUnaligned(ref rDst, ref rSrc, (uint)totalIndexBytesNeeded);
+                }
+                _d3dContext.Unmap(_dynamicIndexBuffer, 0);
+            }
+            else
+            {
+                _dynamicIndexBuffer?.Dispose();
+                _dynamicIndexBuffer = null;
+                _dynamicIndexBufferSize = 0;
             }
 
             // ---------------------------------------------------------
@@ -479,7 +590,6 @@ namespace ShaderExtends.D3D11
                 ApplyGraphicsState();
 
                 // 设置全局状态
-                _d3dContext.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
                 _d3dContext.VSSetShader(material.Effect.VS);
                 _d3dContext.PSSetShader(material.Effect.PS);
                 _d3dContext.IASetInputLayout(material.Effect.Layout);
@@ -520,6 +630,8 @@ namespace ShaderExtends.D3D11
                 for (int i = 0; i < batchCount; i++)
                 {
                     var batch = _gpuBatches[i];
+
+                    _d3dContext.IASetPrimitiveTopology(GetD3DTopology(batch.PrimitiveType));
                     IntPtr finalSRVHandle = batch.TextureHandle;
                     // --- 新增：D3D11 Compute Shader 处理逻辑 ---
                     if (material.Effect.CS != null)
@@ -590,7 +702,7 @@ namespace ShaderExtends.D3D11
                         _d3dContext.IASetVertexBuffers(0, 1, new ID3D11Buffer[] { null }, new uint[] { 0 }, new uint[] { 0 });
                         _d3dContext.Draw((uint)batch.VertexCount, 0);
                     }
-                    else
+                    else if(batch.IndexCount <= 0 && batch.StartIndex == -1)
                     {
                         if (lastLayout == null)
                         {
@@ -598,8 +710,22 @@ namespace ShaderExtends.D3D11
                             lastLayout = material.Effect.Layout;
                         }
 
+
                         _d3dContext.IASetVertexBuffer(0, _dynamicVertexBuffer, (uint)stride, 0);
                         _d3dContext.Draw((uint)batch.VertexCount, (uint)batch.StartVertex);
+                    }
+                    else if(batch.IndexCount > 0 && batch.StartIndex != -1)
+                    {
+
+                        if (lastLayout == null)
+                        {
+                            _d3dContext.IASetInputLayout(material.Effect.Layout);
+                            lastLayout = material.Effect.Layout;
+                        }
+
+                        _d3dContext.IASetIndexBuffer(_dynamicIndexBuffer, Format.R16_UInt, 0);
+                        _d3dContext.IASetVertexBuffer(0, _dynamicVertexBuffer, (uint)stride, 0);
+                        _d3dContext.DrawIndexed((uint)batch.IndexCount, (uint)batch.StartIndex, batch.StartVertex);    
                     }
                 }
             }
@@ -627,6 +753,27 @@ namespace ShaderExtends.D3D11
                     StructureByteStride = 0
                 };
                 _dynamicVertexBuffer = _d3dDevice.CreateBuffer(desc);
+            }
+        }
+
+        private void EnsureDynamicIndexBufferSize(int sizeInBytes)
+        {
+            if (_dynamicIndexBuffer == null || _dynamicIndexBufferSize < sizeInBytes)
+            {
+                _dynamicIndexBuffer?.Dispose();
+
+                // 稍微多分配一点，避免频繁扩容
+                _dynamicIndexBufferSize = Math.Max(sizeInBytes, _dynamicIndexBufferSize * 2);
+
+                var desc = new BufferDescription
+                {
+                    ByteWidth = (uint)_dynamicIndexBufferSize,
+                    Usage = ResourceUsage.Dynamic,          // 关键：动态
+                    BindFlags = BindFlags.IndexBuffer,
+                    CPUAccessFlags = CpuAccessFlags.Write,  // 关键：CPU可写
+                    StructureByteStride = 0
+                };
+                _dynamicIndexBuffer = _d3dDevice.CreateBuffer(desc);
             }
         }
 
@@ -1013,6 +1160,17 @@ namespace ShaderExtends.D3D11
             };
         }
 
+        // 映射示例
+        private PrimitiveTopology GetD3DTopology(PrimitiveType type) => type switch
+        {
+            PrimitiveType.TriangleList => PrimitiveTopology.TriangleList,
+            PrimitiveType.TriangleStrip => PrimitiveTopology.TriangleStrip,
+            PrimitiveType.LineList => PrimitiveTopology.LineList,
+            PrimitiveType.LineStrip => PrimitiveTopology.LineStrip,
+            PrimitiveType.PointListEXT => PrimitiveTopology.PointList,
+            _ => PrimitiveTopology.TriangleList
+        };
+
         /// <summary>
         /// CPU 端：生成顶点数据，返回指针
         /// </summary>
@@ -1058,7 +1216,6 @@ namespace ShaderExtends.D3D11
             {
                 RestoreDeviceState(in state);
                 _isActive = false;
-                _drawQueue.Clear();
                 _currentMaterial = null;
                 _depthEpsilon = 0f;
                 GlobalVertexPool.ResetAll();

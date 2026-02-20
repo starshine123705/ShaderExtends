@@ -1,6 +1,10 @@
+using JetBrains.Annotations;
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using Terraria.ModLoader;
@@ -11,9 +15,11 @@ namespace ShaderExtends
 	public class ShaderExtends : Mod
 	{
 		public static Mod Instance;
+		public static bool allowShaderExtends = true;
 		public ShaderExtends()
 		{
 			Instance = this;
-        }
+		}
+
     }
 }

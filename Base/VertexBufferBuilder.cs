@@ -11,6 +11,9 @@ using System.Threading.Tasks;
 
 namespace ShaderExtends.Base
 {
+    // 文件: Base/VertexBufferBuilder.cs
+    // 说明: 提供若干便捷函数，用于构建常见的顶点布局（VertexPositionColorTexture），用于快速生成四边形
+    //      的顶点数据。支持旋转、翻转、颜色与纹理坐标计算。返回值为生成的顶点数。
     public static class VertexBufferBuilder
     {
         public static int BuildVertices(Span<VertexPositionColorTexture> destPtr, in Rectangle source, in Rectangle dest, int texWidth, int texHeight, float rotation = 0f, float depth = 0f, uint color = 0xFFFFFFFF, bool filpX = false, bool filpY = false)
@@ -74,6 +77,7 @@ namespace ShaderExtends.Base
                 corners[7] = centerY + rightY + bottomY;
             }
 
+            // TriangleStrip order: TL, TR, BL, BR
             destPtr[0].Position.X = corners[0];
             destPtr[0].Position.Y = corners[1];
             destPtr[0].Position.Z = depth;
@@ -95,28 +99,14 @@ namespace ShaderExtends.Base
             destPtr[2].TextureCoordinate.X = u0;
             destPtr[2].TextureCoordinate.Y = v1;
 
-            destPtr[3].Position.X = corners[4];
-            destPtr[3].Position.Y = corners[5];
+            destPtr[3].Position.X = corners[6];
+            destPtr[3].Position.Y = corners[7];
             destPtr[3].Position.Z = depth;
             destPtr[3].Color = color.ToUIntColor();
-            destPtr[3].TextureCoordinate.X = u0;
+            destPtr[3].TextureCoordinate.X = u1;
             destPtr[3].TextureCoordinate.Y = v1;
 
-            destPtr[4].Position.X = corners[2];
-            destPtr[4].Position.Y = corners[3];
-            destPtr[4].Position.Z = depth;
-            destPtr[4].Color = color.ToUIntColor();
-            destPtr[4].TextureCoordinate.X = u1;
-            destPtr[4].TextureCoordinate.Y = v0;
-
-            destPtr[5].Position.X = corners[6];
-            destPtr[5].Position.Y = corners[7];
-            destPtr[5].Position.Z = depth;
-            destPtr[5].Color = color.ToUIntColor();
-            destPtr[5].TextureCoordinate.X = u1;
-            destPtr[5].TextureCoordinate.Y = v1;
-
-            return 6;
+            return 4;
         }
 
         public static int BuildVertices(Span<VertexPositionColorTexture> destPtr, in Rectangle source, in Vector2 dest, in float destWidth, in float destHeight, int texWidth, int texHeight, float rotation = 0f, float depth = 0f, uint color = 0xFFFFFFFF, bool filpX = false, bool filpY = false)
@@ -181,6 +171,7 @@ namespace ShaderExtends.Base
                 corners[7] = centerY + rightY + bottomY;
             }
 
+            // TriangleStrip order: TL, TR, BL, BR
             destPtr[0].Position.X = corners[0];
             destPtr[0].Position.Y = corners[1];
             destPtr[0].Position.Z = depth;
@@ -202,28 +193,14 @@ namespace ShaderExtends.Base
             destPtr[2].TextureCoordinate.X = u0;
             destPtr[2].TextureCoordinate.Y = v1;
 
-            destPtr[3].Position.X = corners[4];
-            destPtr[3].Position.Y = corners[5];
+            destPtr[3].Position.X = corners[6];
+            destPtr[3].Position.Y = corners[7];
             destPtr[3].Position.Z = depth;
             destPtr[3].Color = color.ToUIntColor();
-            destPtr[3].TextureCoordinate.X = u0;
+            destPtr[3].TextureCoordinate.X = u1;
             destPtr[3].TextureCoordinate.Y = v1;
 
-            destPtr[4].Position.X = corners[2];
-            destPtr[4].Position.Y = corners[3];
-            destPtr[4].Position.Z = depth;
-            destPtr[4].Color = color.ToUIntColor();
-            destPtr[4].TextureCoordinate.X = u1;
-            destPtr[4].TextureCoordinate.Y = v0;
-
-            destPtr[5].Position.X = corners[6];
-            destPtr[5].Position.Y = corners[7];
-            destPtr[5].Position.Z = depth;
-            destPtr[5].Color = color.ToUIntColor();
-            destPtr[5].TextureCoordinate.X = u1;
-            destPtr[5].TextureCoordinate.Y = v1;
-
-            return 6;
+            return 4;
         }
 
         public static int BuildVertices(Span<VertexPositionColorTexture> destPtr, in Rectangle texBounds, in Vector2 pos, float rotation = 0f, float depth = 0f, uint color = 0xFFFFFFFF, bool filpX = false, bool filpY = false)
@@ -290,6 +267,7 @@ namespace ShaderExtends.Base
                 corners[7] = centerY + rightY + bottomY;
             }
 
+            // TriangleStrip order: TL, TR, BL, BR
             destPtr[0].Position.X = corners[0];
             destPtr[0].Position.Y = corners[1];
             destPtr[0].Position.Z = depth;
@@ -311,28 +289,14 @@ namespace ShaderExtends.Base
             destPtr[2].TextureCoordinate.X = u0;
             destPtr[2].TextureCoordinate.Y = v1;
 
-            destPtr[3].Position.X = corners[4];
-            destPtr[3].Position.Y = corners[5];
+            destPtr[3].Position.X = corners[6];
+            destPtr[3].Position.Y = corners[7];
             destPtr[3].Position.Z = depth;
             destPtr[3].Color = color.ToUIntColor();
-            destPtr[3].TextureCoordinate.X = u0;
+            destPtr[3].TextureCoordinate.X = u1;
             destPtr[3].TextureCoordinate.Y = v1;
 
-            destPtr[4].Position.X = corners[2];
-            destPtr[4].Position.Y = corners[3];
-            destPtr[4].Position.Z = depth;
-            destPtr[4].Color = color.ToUIntColor();
-            destPtr[4].TextureCoordinate.X = u1;
-            destPtr[4].TextureCoordinate.Y = v0;
-
-            destPtr[5].Position.X = corners[6];
-            destPtr[5].Position.Y = corners[7];
-            destPtr[5].Position.Z = depth;
-            destPtr[5].Color = color.ToUIntColor();
-            destPtr[5].TextureCoordinate.X = u1;
-            destPtr[5].TextureCoordinate.Y = v1;
-
-            return 6;
+            return 4;
         }
 
         public static Color ToUIntColor(this uint color)
